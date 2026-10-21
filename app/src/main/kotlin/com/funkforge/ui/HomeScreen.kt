@@ -1,6 +1,16 @@
 package com.funkforge.ui
 
-import androidx.compose.animation.core.*
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -8,14 +18,23 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
@@ -23,7 +42,11 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,7 +73,8 @@ private data class HomeParticle(
     val phase: Float,
     val lane: Int,
     val size: Int,
-    val drift: Float
+    val drift: Float,
+    val opacity: Float
 )
 
 @Composable
@@ -66,19 +90,22 @@ fun HomeScreen(
     val density = LocalDensity.current.density
 
     val particles = remember {
-        List(24) {
+        List(26) {
             HomeParticle(
                 x = Random.nextFloat(),
-                speed = 0.4f + Random.nextFloat() * 1.4f,
+                speed = 0.4f + Random.nextFloat() * 1.3f,
                 phase = Random.nextFloat(),
                 lane = Random.nextInt(4),
-                size = Random.nextInt(24, 54),
-                drift = Random.nextFloat() * 2f - 1f
+                size = Random.nextInt(22, 52),
+                drift = Random.nextFloat() * 2f - 1f,
+                opacity = 0.08f + Random.nextFloat() * 0.14f
             )
         }
     }
 
-    val transition = rememberInfiniteTransition(label = "home")
+    val transition = rememberInfiniteTransition(
+        label = "homeAnimation"
+    )
 
     val time by transition.animateFloat(
         initialValue = 0f,
@@ -89,7 +116,7 @@ fun HomeScreen(
                 easing = LinearEasing
             )
         ),
-        label = "particles"
+        label = "particleTime"
     )
 
     val beat by transition.animateFloat(
@@ -101,48 +128,63 @@ fun HomeScreen(
                 easing = LinearEasing
             )
         ),
-        label = "beat"
+        label = "noteBeat"
     )
 
     val glow by transition.animateFloat(
         initialValue = 0.25f,
         targetValue = 0.65f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = FastOutSlowInEasing),
+            animation = tween(
+                durationMillis = 1800,
+                easing = FastOutSlowInEasing
+            ),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "glow"
+        label = "backgroundGlow"
     )
 
-    var taps by remember { mutableIntStateOf(0) }
+    var taps by remember {
+        mutableIntStateOf(0)
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    listOf(Fk.bg, Fk.bg2, Fk.bg)
+                    colors = listOf(
+                        Fk.bg,
+                        Fk.bg2,
+                        Fk.bg
+                    )
                 )
             )
     ) {
-        Canvas(Modifier.fillMaxSize()) {
+        Canvas(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            val pinkCenter = Offset(
+                size.width * 0.15f,
+                size.height * 0.25f
+            )
+
+            val cyanCenter = Offset(
+                size.width * 0.85f,
+                size.height * 0.75f
+            )
+
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
                         Fk.pink.copy(alpha = glow * 0.25f),
                         Color.Transparent
                     ),
-                    center = Offset(
-                        size.width * 0.15f,
-                        size.height * 0.25f
-                    ),
+                    center = pinkCenter,
                     radius = size.width * 0.8f
                 ),
                 radius = size.width * 0.8f,
-                center = Offset(
-                    size.width * 0.15f,
-                    size.height * 0.25f
-                )
+                center = pinkCenter
             )
 
             drawCircle(
@@ -151,21 +193,17 @@ fun HomeScreen(
                         Fk.cyan.copy(alpha = glow * 0.2f),
                         Color.Transparent
                     ),
-                    center = Offset(
-                        size.width * 0.85f,
-                        size.height * 0.75f
-                    ),
+                    center = cyanCenter,
                     radius = size.width * 0.75f
                 ),
                 radius = size.width * 0.75f,
-                center = Offset(
-                    size.width * 0.85f,
-                    size.height * 0.75f
-                )
+                center = cyanCenter
             )
 
             particles.forEach { particle ->
-                val pixelSize = (particle.size * density).toInt()
+                val pixelSize = (
+                    particle.size * density
+                ).toInt()
 
                 val progress = (
                     time * particle.speed + particle.phase
@@ -175,8 +213,13 @@ fun HomeScreen(
                     progress * PI.toFloat() * 2f
                 ) * particle.drift * 20f * density
 
-                val x = particle.x *
+                val x = (
+                    particle.x *
                     (size.width - pixelSize) + wave
+                ).coerceIn(
+                    0f,
+                    (size.width - pixelSize).coerceAtLeast(0f)
+                )
 
                 val y = size.height -
                     progress * (size.height + pixelSize)
@@ -187,8 +230,13 @@ fun HomeScreen(
                         x.toInt(),
                         y.toInt()
                     ),
-                    dstSize = IntSize(pixelSize, pixelSize),
-                    alpha = 0.12f + glow * 0.12f
+                    dstSize = IntSize(
+                        pixelSize,
+                        pixelSize
+                    ),
+                    alpha = (
+                        particle.opacity + glow * 0.05f
+                    ).coerceIn(0f, 1f)
                 )
             }
         }
@@ -204,59 +252,14 @@ fun HomeScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(Fk.cyan.copy(alpha = 0.1f))
-                    .border(
-                        1.dp,
-                        Fk.cyan.copy(alpha = 0.35f),
-                        RoundedCornerShape(50)
-                    )
-                    .padding(
-                        horizontal = 16.dp,
-                        vertical = 7.dp
-                    )
-            ) {
-                Text(
-                    text = "FUNKFORGE  •  V0.1",
-                    color = Fk.cyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.sp
-                )
-            }
+            HomeVersionBadge()
 
-            Spacer(Modifier.height(30.dp))
+            Spacer(Modifier.height(28.dp))
 
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val active = beat.toInt().coerceIn(0, 3)
-
-                repeat(4) { index ->
-                    val targetScale =
-                        if (index == active) 1.22f else 0.94f
-
-                    val scale by animateFloatAsState(
-                        targetValue = targetScale,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessMedium
-                        ),
-                        label = "noteScale"
-                    )
-
-                    Image(
-                        bitmap = sprites.notes[index],
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(62.dp)
-                            .scale(scale)
-                    )
-                }
-            }
+            HomeNoteHeader(
+                notes = sprites.notes,
+                beat = beat
+            )
 
             Spacer(Modifier.height(22.dp))
 
@@ -264,7 +267,10 @@ fun HomeScreen(
                 text = "FunkForge",
                 style = MaterialTheme.typography.displayMedium.copy(
                     brush = Brush.horizontalGradient(
-                        listOf(Fk.cyan, Fk.pink)
+                        colors = listOf(
+                            Fk.cyan,
+                            Fk.pink
+                        )
                     ),
                     fontWeight = FontWeight.Black,
                     letterSpacing = (-1.5).sp
@@ -301,27 +307,9 @@ fun HomeScreen(
 
             Spacer(Modifier.height(34.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AutoAwesome,
-                    contentDescription = null,
-                    tint = Fk.yellow,
-                    modifier = Modifier.size(18.dp)
-                )
-
-                Spacer(Modifier.width(8.dp))
-
-                Text(
-                    text = "YOUR WORKSPACE",
-                    color = Fk.textSecondary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
-                    letterSpacing = 1.5.sp
-                )
-            }
+            HomeSectionHeader(
+                title = "YOUR WORKSPACE"
+            )
 
             Spacer(Modifier.height(14.dp))
 
@@ -379,27 +367,105 @@ fun HomeScreen(
                 onClick = onSecret
             )
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(30.dp))
 
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(Color.White.copy(alpha = 0.05f))
-                    .padding(
-                        horizontal = 18.dp,
-                        vertical = 10.dp
-                    )
-            ) {
-                Text(
-                    text = "MADE FOR MOBILE  •  KEEP FUNKIN'",
-                    color = Fk.textMuted,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
+            HomeFooter()
         }
+    }
+}
+
+@Composable
+private fun HomeVersionBadge() {
+    val shape = RoundedCornerShape(50)
+
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(
+                Fk.cyan.copy(alpha = 0.1f)
+            )
+            .border(
+                width = 1.dp,
+                color = Fk.cyan.copy(alpha = 0.35f),
+                shape = shape
+            )
+            .padding(
+                horizontal = 16.dp,
+                vertical = 7.dp
+            )
+    ) {
+        Text(
+            text = "FUNKFORGE  •  V0.1",
+            color = Fk.cyan,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 2.sp
+        )
+    }
+}
+
+@Composable
+private fun HomeNoteHeader(
+    notes: List<androidx.compose.ui.graphics.ImageBitmap>,
+    beat: Float
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val active = beat.toInt().coerceIn(0, 3)
+
+        repeat(minOf(4, notes.size)) { index ->
+            val targetScale = if (index == active) {
+                1.22f
+            } else {
+                0.94f
+            }
+
+            val scale by animateFloatAsState(
+                targetValue = targetScale,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium
+                ),
+                label = "noteScale$index"
+            )
+
+            Image(
+                bitmap = notes[index],
+                contentDescription = null,
+                modifier = Modifier
+                    .size(62.dp)
+                    .scale(scale)
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeSectionHeader(
+    title: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Star,
+            contentDescription = null,
+            tint = Fk.yellow,
+            modifier = Modifier.size(18.dp)
+        )
+
+        Spacer(Modifier.width(8.dp))
+
+        Text(
+            text = title,
+            color = Fk.textSecondary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            letterSpacing = 1.5.sp
+        )
     }
 }
 
@@ -428,14 +494,26 @@ private fun HomeMenuCard(
         label = "cardScale"
     )
 
-    val backgroundColor by animateColorAsState(
+    val backgroundColor: Color by animateColorAsState(
         targetValue = if (pressed) {
-            accent.copy(alpha = 0.17f)
+            Fk.purple.copy(alpha = 0.3f)
         } else {
-            Fk.surface.copy(alpha = 0.85f)
+            Fk.surface.copy(alpha = 0.9f)
         },
-        animationSpec = tween(180),
+        animationSpec = tween(
+            durationMillis = 180
+        ),
         label = "cardBackground"
+    )
+
+    val borderColor: Color by animateColorAsState(
+        targetValue = accent.copy(
+            alpha = if (pressed) 0.9f else 0.35f
+        ),
+        animationSpec = tween(
+            durationMillis = 180
+        ),
+        label = "cardBorder"
     )
 
     Row(
@@ -446,9 +524,7 @@ private fun HomeMenuCard(
             .background(backgroundColor)
             .border(
                 width = 1.dp,
-                color = accent.copy(
-                    alpha = if (pressed) 0.9f else 0.35f
-                ),
+                color = borderColor,
                 shape = shape
             )
             .clickable(
@@ -462,8 +538,12 @@ private fun HomeMenuCard(
         Box(
             modifier = Modifier
                 .size(48.dp)
-                .clip(RoundedCornerShape(15.dp))
-                .background(accent.copy(alpha = 0.15f)),
+                .clip(
+                    RoundedCornerShape(15.dp)
+                )
+                .background(
+                    accent.copy(alpha = 0.15f)
+                ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -507,6 +587,32 @@ private fun HomeMenuCard(
             contentDescription = null,
             tint = accent.copy(alpha = 0.85f),
             modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+@Composable
+private fun HomeFooter() {
+    val shape = RoundedCornerShape(50)
+
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(
+                Color.White.copy(alpha = 0.05f)
+            )
+            .padding(
+                horizontal = 18.dp,
+                vertical = 10.dp
+            )
+    ) {
+        Text(
+            text = "MADE FOR MOBILE  •  KEEP FUNKIN'",
+            color = Fk.textMuted,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            textAlign = TextAlign.Center
         )
     }
 }
