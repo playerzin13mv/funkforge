@@ -69,13 +69,16 @@ object PsychFormat : ChartFormat {
         var start = 0.0
         var bpm = chart.bpmChanges.first().bpm
         var first = true
+        val sortedNotes = chart.notes.sortedBy { it.timeMs }
+        var idx = 0
         do {
-            val newBpm = chart.bpmChanges.lastOrNull { it.timeMs <= start + 1 }?.bpm ?: bpm
+            val newBpm = (chart.bpmChanges.lastOrNull { it.timeMs <= start + 1 }?.bpm ?: bpm).coerceIn(20.0, 999.0)
             val changed = !first && newBpm != bpm
             bpm = newBpm
             val end = start + 4 * 60000.0 / bpm
             // seção do jogador se tiver mais notas de jogador do que de oponente; senão oponente
-            val inSec = chart.notes.filter { it.timeMs >= start && it.timeMs < end }
+            val inSec = ArrayList<Note>()
+            while (idx < sortedNotes.size && sortedNotes[idx].timeMs < end) { inSec.add(sortedNotes[idx]); idx++ }
             val mustHit = inSec.count { it.lane >= 4 } >= inSec.count { it.lane < 4 }
             val sn = inSec.map { n ->
                 val isPlayer = n.lane >= 4
@@ -98,7 +101,7 @@ object PsychFormat : ChartFormat {
             }
             first = false
             start = end
-        } while (start <= lastMs)
+        } while (start <= lastMs && sections.size < 20000)
 
         val evs = chart.events.groupBy { it.timeMs }.toSortedMap().map { (t, list) ->
             buildJsonArray {

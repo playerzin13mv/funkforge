@@ -10,6 +10,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -36,7 +39,7 @@ import kotlin.random.Random
 private data class Particle(val x: Float, val speed: Int, val phase: Float, val lane: Int, val size: Int)
 
 @Composable
-fun HomeScreen(onNew: () -> Unit, onImport: () -> Unit, onSoon: (String) -> Unit) {
+fun HomeScreen(hasProject: Boolean, onContinue: () -> Unit, onNew: () -> Unit, onImport: () -> Unit, onSecret: () -> Unit, onSoon: (String) -> Unit) {
     val sprites = rememberSprites()
     val density = LocalDensity.current.density
     val parts = remember { List(18) { Particle(Random.nextFloat(), 1 + Random.nextInt(3), Random.nextFloat(), Random.nextInt(4), 34 + Random.nextInt(32)) } }
@@ -62,7 +65,7 @@ fun HomeScreen(onNew: () -> Unit, onImport: () -> Unit, onSoon: (String) -> Unit
         }
 
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 24.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -85,19 +88,23 @@ fun HomeScreen(onNew: () -> Unit, onImport: () -> Unit, onSoon: (String) -> Unit
                 ),
                 modifier = Modifier.clickable {
                     taps++
-                    if (taps == 7) { taps = 0; onSoon("🔥 Você acendeu a forja secreta... (em breve)") }
+                    if (taps == 7) { taps = 0; onSecret() }
                 }
             )
             Text("Faça mods de Psych Engine pelo celular", color = Color.White.copy(alpha = 0.75f), fontSize = 15.sp)
             Spacer(Modifier.height(32.dp))
 
+            if (hasProject) {
+                MenuCard(Icons.Default.PlayArrow, "Continuar mod", "Voltar pro último projeto", Fk.yellow, onContinue)
+                Spacer(Modifier.height(12.dp))
+            }
             MenuCard(Icons.Default.Add, "Novo mod", "Comece um chart do zero", Fk.pink, onNew)
             Spacer(Modifier.height(12.dp))
             MenuCard(Icons.Default.FileOpen, "Importar chart", "Psych Engine (.json)", Fk.cyan, onImport)
             Spacer(Modifier.height(12.dp))
             MenuCard(Icons.Default.SwapHoriz, "Conversor Funky Maker", "Em breve", Fk.lane[2]) { onSoon("Em breve! Preciso de um mod de exemplo do Funky Maker 😉") }
             Spacer(Modifier.height(12.dp))
-            MenuCard(Icons.Default.Star, "???", "Algo secreto vem aí", Fk.yellow) { onSoon("🤫 Segredo...") }
+            MenuCard(Icons.Default.Star, "???", "Algo secreto vem aí", Fk.yellow, onSecret)
 
             Spacer(Modifier.height(28.dp))
             Text("v0.1 • feito no celular 📱", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp)
