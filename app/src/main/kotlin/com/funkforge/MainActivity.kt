@@ -1,4 +1,3 @@
-
 package com.funkforge
 
 import android.content.Context
