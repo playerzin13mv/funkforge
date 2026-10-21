@@ -10,16 +10,17 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.funkforge.backend.Language
+import com.funkforge.backend.TextKey
+import com.funkforge.data.FPSOverlay
 import com.funkforge.external.StorageUtil
 import com.funkforge.model.Project
 import com.funkforge.model.ProjectStore
@@ -74,7 +75,19 @@ class MainActivity : ComponentActivity() {
                     onSurface = Fk.text
                 )
             ) {
-                FunkForgeApp()
+                Box(Modifier.fillMaxSize()) {
+                    FunkForgeApp()
+
+                    FPSOverlay(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(
+                                start = 8.dp,
+                                top = 48.dp
+                            ),
+                        showDetails = true
+                    )
+                }
             }
         }
     }
@@ -131,16 +144,10 @@ fun FunkForgeApp() {
         mutableStateOf<Uri?>(null)
     }
 
-    var status by remember {
-        mutableStateOf("")
-    }
-
     val latestProject by rememberUpdatedState(project)
     val latestHasProject by rememberUpdatedState(hasProject)
 
     fun toast(message: String) {
-        status = message
-
         Toast.makeText(
             context,
             message,
@@ -154,10 +161,7 @@ fun FunkForgeApp() {
         val snapshot = project
 
         runCatching {
-            saveProjectSnapshot(
-                context,
-                snapshot
-            )
+            saveProjectSnapshot(context, snapshot)
         }
     }
 
@@ -220,10 +224,7 @@ fun FunkForgeApp() {
 
         withContext(Dispatchers.IO) {
             runCatching {
-                saveProjectSnapshot(
-                    context,
-                    snapshot
-                )
+                saveProjectSnapshot(context, snapshot)
             }
         }
     }
@@ -241,18 +242,15 @@ fun FunkForgeApp() {
                         uri
                     )
 
-                    project = project.copy(
-                        chart = chart
-                    )
-
+                    project = project.copy(chart = chart)
                     hasProject = true
                     showNew = false
                     screen = Screen.Editor
 
-                    toast("Chart imported successfully")
+                    toast(Language.get(TextKey.IMPORT_SUCCESS))
                 } catch (e: Exception) {
                     toast(
-                        "Chart import failed: ${e.message}"
+                        "${Language.get(TextKey.IMPORT_FAILED)}: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -279,10 +277,10 @@ fun FunkForgeApp() {
                         snapshot.chart
                     )
 
-                    toast("Chart exported successfully")
+                    toast(Language.get(TextKey.EXPORT_SUCCESS))
                 } catch (e: Exception) {
                     toast(
-                        "Chart export failed: ${e.message}"
+                        "${Language.get(TextKey.EXPORT_FAILED)}: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -319,16 +317,18 @@ fun FunkForgeApp() {
                         )
                     }
 
-                    if (unsupportedAudio) {
-                        toast(
-                            "Mod exported. Convert audio to OGG for Psych Engine."
-                        )
-                    } else {
-                        toast("Mod exported successfully")
-                    }
+                    toast(
+                        if (unsupportedAudio) {
+                            Language.get(
+                                TextKey.CONVERT_AUDIO_WARNING
+                            )
+                        } else {
+                            Language.get(TextKey.MOD_EXPORTED)
+                        }
+                    )
                 } catch (e: Exception) {
                     toast(
-                        "Mod export failed: ${e.message}"
+                        "${Language.get(TextKey.MOD_EXPORT_FAILED)}: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -353,6 +353,12 @@ fun FunkForgeApp() {
                         target
                     )
 
+                    val previousPath = if (target == "inst") {
+                        project.instPath
+                    } else {
+                        project.voicesPath
+                    }
+
                     project = if (target == "inst") {
                         project.copy(
                             instPath = file.absolutePath
@@ -363,16 +369,28 @@ fun FunkForgeApp() {
                         )
                     }
 
+                    saveNow()
+
+                    if (previousPath != null) {
+                        StorageUtil.deleteUnusedAudio(
+                            context,
+                            previousPath,
+                            project
+                        )
+                    }
+
                     toast(
-                        if (target == "inst") {
-                            "Instrumental loaded successfully"
-                        } else {
-                            "Vocals loaded successfully"
-                        }
+                        Language.get(
+                            if (target == "inst") {
+                                TextKey.INST_LOADED
+                            } else {
+                                TextKey.VOICES_LOADED
+                            }
+                        )
                     )
                 } catch (e: Exception) {
                     toast(
-                        "Audio import failed: ${e.message}"
+                        "${Language.get(TextKey.AUDIO_IMPORT_FAILED)}: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -399,16 +417,185 @@ fun FunkForgeApp() {
     }
 
     BackHandler(
-        enabled = showNew || (
-            screen != Screen.Home &&
-            screen != Screen.Play &&
-            screen != Screen.ModTest
-        )
+        enabled = showNew ||
+            (
+                screen != Screen.Home &&
+                screen != Screen.Play &&
+                screen != Screen.ModTest
+            )
     ) {
         if (showNew) {
             showNew = false
         } else {
             navigateBack()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Fk.bg)
+    ) {
+        when (screen) {
+            Screen.Home -> {
+                HomeScreen(
+                    hasProject = hasProject,
+                    onContinue = {
+                        if (hasProject) {
+                            openScreen(Screen.Editor)
+                        } else {
+                            showNew = true
+                        }
+                    },
+                    onNew = {
+                        if (!busy) showNew = true
+                    },
+                    onImport = {
+                        if (!busy) {
+                            importer.launch(
+                                arrayOf(
+                                    "application/json",
+                                    "text/plain",
+                                    "application/octet-stream"
+                                )
+                            )
+                        }
+                    },
+                    onSecret = {
+                        openScreen(Screen.Secret)
+                    },
+                    onSoon = { message ->
+                        if (message == "Open Mod Folder") {
+                            if (!busy) {
+                                modFolderPicker.launch(null)
+                            }
+                        } else {
+                            toast(message)
+                        }
+                    },
+                    onOptions = {
+                        openScreen(Screen.Options)
+                    },
+                    onEditor = {
+                        if (hasProject) {
+                            openScreen(Screen.Editor)
+                        } else {
+                            showNew = true
+                        }
+                    }
+                )
+            }
+
+            Screen.Editor -> {
+                EditorScreen(
+                    project = project,
+                    onProject = { updated ->
+                        project = updated
+                        hasProject = true
+                    },
+                    onBack = {
+                        navigateBack()
+                    },
+                    onImport = {
+                        if (!busy) {
+                            importer.launch(
+                                arrayOf(
+                                    "application/json",
+                                    "text/plain",
+                                    "application/octet-stream"
+                                )
+                            )
+                        }
+                    },
+                    onExportJson = {
+                        if (!busy) {
+                            jsonExporter.launch(
+                                "${StorageUtil.safeName(project.chart.song)}.json"
+                            )
+                        }
+                    },
+                    onExportMod = {
+                        if (!busy) {
+                            modExporter.launch(
+                                "${StorageUtil.safeName(project.modName)}.zip"
+                            )
+                        }
+                    },
+                    onPickInst = {
+                        if (!busy) {
+                            audioTarget = "inst"
+                            audioPicker.launch(
+                                arrayOf("audio/*")
+                            )
+                        }
+                    },
+                    onPickVoices = {
+                        if (!busy) {
+                            audioTarget = "voices"
+                            audioPicker.launch(
+                                arrayOf("audio/*")
+                            )
+                        }
+                    },
+                    onPlaytest = {
+                        saveNow()
+                        openScreen(Screen.Play)
+                    }
+                )
+            }
+
+            Screen.Play -> {
+                PlayScreen(
+                    project = project,
+                    onExit = {
+                        navigateBack()
+                    }
+                )
+            }
+
+            Screen.ModTest -> {
+                val folder = selectedModFolder
+
+                if (folder != null) {
+                    PlayTest(
+                        modFolderUri = folder,
+                        onBack = {
+                            navigateBack()
+                        }
+                    )
+                } else {
+                    LaunchedEffect(Unit) {
+                        screen = Screen.Home
+                    }
+                }
+            }
+
+            Screen.Secret -> {
+                SecretScreen()
+            }
+
+            Screen.Options -> {
+                FunkForgeOptionsScreen(
+                    onBack = {
+                        navigateBack()
+                    }
+                )
+            }
+        }
+
+        if (busy) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = Fk.bg.copy(alpha = 0.72f)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = Fk.cyan
+                    )
+                }
+            }
         }
     }
 
@@ -423,168 +610,9 @@ fun FunkForgeApp() {
                 project = newProject
                 hasProject = true
                 showNew = false
+                saveNow()
                 screen = Screen.Editor
             }
         )
-    }
-
-    when (screen) {
-        Screen.Home -> {
-            HomeScreen(
-                hasProject = hasProject,
-                onContinue = {
-                    if (hasProject) {
-                        openScreen(Screen.Editor)
-                    } else {
-                        showNew = true
-                    }
-                },
-                onNew = {
-                    if (!busy) {
-                        showNew = true
-                    }
-                },
-                onImport = {
-                    if (!busy) {
-                        importer.launch(
-                            arrayOf(
-                                "application/json",
-                                "text/plain"
-                            )
-                        )
-                    }
-                },
-                onSecret = {
-                    openScreen(Screen.Secret)
-                },
-                onSoon = { message ->
-                    if (message == "Open Mod Folder") {
-                        if (!busy) {
-                            modFolderPicker.launch(null)
-                        }
-                    } else {
-                        toast(message)
-                    }
-                },
-                onOptions = {
-                    openScreen(Screen.Options)
-                },
-                onEditor = {
-                    if (hasProject) {
-                        openScreen(Screen.Editor)
-                    } else {
-                        showNew = true
-                    }
-                }
-            )
-        }
-
-        Screen.Editor -> {
-            EditorScreen(
-                project = project,
-                onProject = { updated ->
-                    project = updated
-                    hasProject = true
-                },
-                onBack = {
-                    navigateBack()
-                },
-                onImport = {
-                    if (!busy) {
-                        importer.launch(
-                            arrayOf(
-                                "application/json",
-                                "text/plain"
-                            )
-                        )
-                    }
-                },
-                onExportJson = {
-                    if (!busy) {
-                        jsonExporter.launch(
-                            "${StorageUtil.safeName(project.chart.song)}.json"
-                        )
-                    }
-                },
-                onExportMod = {
-                    if (!busy) {
-                        modExporter.launch(
-                            "${StorageUtil.safeName(project.modName)}.zip"
-                        )
-                    }
-                },
-                onPickInst = {
-                    if (!busy) {
-                        audioTarget = "inst"
-
-                        audioPicker.launch(
-                            arrayOf("audio/*")
-                        )
-                    }
-                },
-                onPickVoices = {
-                    if (!busy) {
-                        audioTarget = "voices"
-
-                        audioPicker.launch(
-                            arrayOf("audio/*")
-                        )
-                    }
-                },
-                onPlaytest = {
-                    saveNow()
-                    openScreen(Screen.Play)
-                }
-            )
-        }
-
-        Screen.Play -> {
-            PlayScreen(
-                project = project,
-                onExit = {
-                    navigateBack()
-                }
-            )
-        }
-
-        Screen.ModTest -> {
-            val folder = selectedModFolder
-
-            if (folder != null) {
-                PlayTest(
-                    modFolderUri = folder,
-                    onBack = {
-                        navigateBack()
-                    }
-                )
-            } else {
-                LaunchedEffect(Unit) {
-                    screen = Screen.Home
-                }
-            }
-        }
-
-        Screen.Secret -> {
-            SecretScreen()
-        }
-
-        Screen.Options -> {
-            FunkForgeOptionsScreen(
-                onBack = {
-                    navigateBack()
-                }
-            )
-        }
-    }
-
-    if (busy) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            CircularProgressIndicator(
-                color = Fk.cyan
-            )
-        }
     }
 }
