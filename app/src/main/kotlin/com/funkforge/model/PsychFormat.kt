@@ -1,131 +1,493 @@
 package com.funkforge.model
 
 import kotlinx.serialization.json.*
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.max
 
-/**
- * Chart JSON do Psych Engine (formato clássico: song.notes[].sectionNotes).
- * Interno: lanes 0..3 = oponente, 4..7 = jogador.
- */
 object PsychFormat : ChartFormat {
+
     override val name = "Psych Engine"
 
-    private val json = Json { prettyPrint = true }
+    private val json = Json {
+        prettyPrint = true
+        isLenient = true
+        ignoreUnknownKeys = true
+    }
+
+    private const val DEFAULT_BPM = 120.0
+    private const val DEFAULT_SPEED = 2.0
+    private const val STEPS_PER_SECTION = 16.0
+    private const val MAX_SECTIONS = 20000
+    private const val EPSILON = 0.001
 
     override fun import(text: String): Chart {
-        val root = Json.parseToJsonElement(text).jsonObject
-        val song = (root["song"] as? JsonObject) ?: root
+        val root = json.parseToJsonElement(
+            text.removePrefix("\uFEFF")
+        ).asObject() ?: throw IllegalArgumentException(
+            "Invalid chart JSON"
+        )
+
+        val song = root["song"].asObject() ?: root
+
+        val initialBpm = song["bpm"]
+            .number(DEFAULT_BPM)
+            .safeBpm()
+
+        val changes = mutableListOf(
+            BpmChange(0.0, initialBpm)
+        )
 
         val notes = mutableListOf<Note>()
-        val bpmChanges = mutableListOf<BpmChange>()
-        var bpm = song["bpm"].dbl(120.0)
-        bpmChanges += BpmChange(0.0, bpm)
+        val events = mutableListOf<ChartEvent>()
 
+        var currentBpm = initialBpm
         var sectionStart = 0.0
-        for (secEl in song["notes"]?.jsonArray ?: JsonArray(emptyList())) {
-            val sec = secEl.jsonObject
-            if (sec["changeBPM"]?.jsonPrimitive?.booleanOrNull == true) {
-                val nb = sec["bpm"].dbl(bpm)
-                if (nb != bpm) { bpm = nb; if (sectionStart > 0) bpmChanges += BpmChange(sectionStart, bpm) }
+
+        val sections = song["notes"].asArray()
+
+        sections.forEach { element ->
+            val section = element.asObject()
+                ?: return@forEach
+
+            val sectionBpm = section["bpm"]
+                .number(currentBpm)
+                .safeBpm()
+
+            val changeBpm = section["changeBPM"]
+                .boolean(false)
+
+            if (
+                changeBpm &&
+                abs(sectionBpm - currentBpm) > EPSILON
+            ) {
+                currentBpm = sectionBpm
+
+                if (sectionStart <= EPSILON) {
+                    changes[0] = BpmChange(
+                        0.0,
+                        currentBpm
+                    )
+                } else {
+                    changes.add(
+                        BpmChange(
+                            sectionStart,
+                            currentBpm
+                        )
+                    )
+                }
             }
-            val mustHit = sec["mustHitSection"]?.jsonPrimitive?.booleanOrNull ?: true
-            for (nEl in sec["sectionNotes"]?.jsonArray ?: JsonArray(emptyList())) {
-                val n = nEl.jsonArray
-                if (n.size < 3) continue
-                val raw = n[1].dbl(0.0).toInt()
-                val isPlayer = (raw < 4) == mustHit
-                val kind = if (n.size > 3) (n[3] as? JsonPrimitive)?.contentOrNull.orEmpty() else ""
-                notes += Note(n[0].dbl(0.0), (if (isPlayer) 4 else 0) + (raw % 4), n[2].dbl(0.0), kind)
-            }
-            val steps = sec["lengthInSteps"].dbl(16.0)
-            sectionStart += steps / 4.0 * 60000.0 / bpm
+
+            val mustHit = section["mustHitSection"]
+                .boolean(true)
+
+            section["sectionNotes"]
+                .asArray()
+                .forEach { noteElement ->
+                    val values = noteElement.asArray()
+
+                    if (values.size < 3) {
+                        return@forEach
+                    }
+
+                    val time = values[0]
+                        .number(Double.NaN)
+
+                    val rawLane = values[1]
+                        .number(Double.NaN)
+
+                    val sustain = values[2]
+                        .number(0.0)
+
+                    if (
+                        !time.isFinite() ||
+                        time < 0.0 ||
+                        !rawLane.isFinite() ||
+                        rawLane < 0.0 ||
+                        rawLane > Int.MAX_VALUE
+                    ) {
+                        return@forEach
+                    }
+
+                    val raw = rawLane.toInt()
+
+                    val isPlayer = (
+                        raw % 8 < 4
+                    ) == mustHit
+
+                    val lane = (
+                        if (isPlayer) 4 else 0
+                    ) + raw % 4
+
+                    val kind = values
+                        .getOrNull(3)
+                        .string()
+
+                    notes.add(
+                        Note(
+                            timeMs = time,
+                            lane = lane,
+                            sustainMs = if (
+                                sustain.isFinite()
+                            ) {
+                                sustain.coerceAtLeast(0.0)
+                            } else {
+                                0.0
+                            },
+                            kind = kind
+                        )
+                    )
+                }
+
+            val steps = section["lengthInSteps"]
+                .number(STEPS_PER_SECTION)
+                .let {
+                    if (it.isFinite() && it > 0.0) {
+                        it
+                    } else {
+                        STEPS_PER_SECTION
+                    }
+                }
+
+            sectionStart += (
+                steps / 4.0
+            ) * 60000.0 / currentBpm
         }
 
-        val events = mutableListOf<ChartEvent>()
-        for (evEl in song["events"]?.jsonArray ?: JsonArray(emptyList())) {
-            val ev = evEl.jsonArray
-            val t = ev[0].dbl(0.0)
-            for (e in ev[1].jsonArray) {
-                val a = e.jsonArray
-                events += ChartEvent(t, a[0].str(), a.getOrNull(1).str(), a.getOrNull(2).str())
+        fun readEvents(element: JsonElement?) {
+            element.asArray().forEach { group ->
+                val values = group.asArray()
+
+                if (values.size < 2) {
+                    return@forEach
+                }
+
+                val time = values[0]
+                    .number(Double.NaN)
+
+                if (
+                    !time.isFinite() ||
+                    time < 0.0
+                ) {
+                    return@forEach
+                }
+
+                values[1].asArray().forEach { entry ->
+                    val data = entry.asArray()
+
+                    if (data.isEmpty()) {
+                        return@forEach
+                    }
+
+                    val name = data[0].string()
+
+                    if (name.isBlank()) {
+                        return@forEach
+                    }
+
+                    events.add(
+                        ChartEvent(
+                            timeMs = time,
+                            name = name,
+                            value1 = data
+                                .getOrNull(1)
+                                .string(),
+                            value2 = data
+                                .getOrNull(2)
+                                .string()
+                        )
+                    )
+                }
             }
+        }
+
+        readEvents(song["events"])
+
+        if (root !== song) {
+            readEvents(root["events"])
         }
 
         return Chart(
-            song = song["song"].str().ifEmpty { "Untitled" },
-            bpmChanges = bpmChanges,
-            speed = song["speed"].dbl(2.0),
-            notes = notes.sortedBy { it.timeMs },
-            events = events.sortedBy { it.timeMs },
-            player1 = song["player1"].str().ifEmpty { "bf" },
-            player2 = song["player2"].str().ifEmpty { "dad" },
-            gfVersion = song["gfVersion"].str().ifEmpty { song["player3"].str().ifEmpty { "gf" } },
-            stage = song["stage"].str().ifEmpty { "stage" }
+            song = song["song"]
+                .string()
+                .ifBlank { "Untitled" },
+            bpmChanges = changes,
+            speed = song["speed"]
+                .number(DEFAULT_SPEED)
+                .safeSpeed(),
+            notes = notes.sortedWith(
+                compareBy<Note> { it.timeMs }
+                    .thenBy { it.lane }
+            ),
+            events = events
+                .distinct()
+                .sortedBy { it.timeMs },
+            player1 = song["player1"]
+                .string()
+                .ifBlank { "bf" },
+            player2 = song["player2"]
+                .string()
+                .ifBlank { "dad" },
+            gfVersion = song["gfVersion"]
+                .string()
+                .ifBlank {
+                    song["player3"]
+                        .string()
+                        .ifBlank { "gf" }
+                },
+            stage = song["stage"]
+                .string()
+                .ifBlank { "stage" }
         )
     }
 
     override fun export(chart: Chart): String {
-        val lastMs = (chart.notes.maxOfOrNull { it.timeMs + it.sustainMs } ?: 0.0)
+        val clean = chart.normalized()
+
+        val bpmChanges = clean.bpmChanges
+            .sortedBy { it.timeMs }
+
+        val initialBpm = bpmChanges
+            .firstOrNull()
+            ?.bpm
+            ?.safeBpm()
+            ?: DEFAULT_BPM
+
+        val sortedNotes = clean.notes
+            .sortedBy { it.timeMs }
+
+        val lastNoteTime = sortedNotes
+            .maxOfOrNull {
+                it.timeMs + it.sustainMs
+            } ?: 0.0
+
+        val lastEventTime = clean.events
+            .maxOfOrNull {
+                it.timeMs
+            } ?: 0.0
+
+        val lastBpmTime = bpmChanges
+            .maxOfOrNull {
+                it.timeMs
+            } ?: 0.0
+
+        val lastTime = max(
+            lastNoteTime,
+            max(lastEventTime, lastBpmTime)
+        )
+
         val sections = mutableListOf<JsonElement>()
-        var start = 0.0
-        var bpm = chart.bpmChanges.first().bpm
-        var first = true
-        val sortedNotes = chart.notes.sortedBy { it.timeMs }
-        var idx = 0
-        do {
-            val newBpm = (chart.bpmChanges.lastOrNull { it.timeMs <= start + 1 }?.bpm ?: bpm).coerceIn(20.0, 999.0)
-            val changed = !first && newBpm != bpm
-            bpm = newBpm
-            val end = start + 4 * 60000.0 / bpm
-            // seção do jogador se tiver mais notas de jogador do que de oponente; senão oponente
-            val inSec = ArrayList<Note>()
-            while (idx < sortedNotes.size && sortedNotes[idx].timeMs < end) { inSec.add(sortedNotes[idx]); idx++ }
-            val mustHit = inSec.count { it.lane >= 4 } >= inSec.count { it.lane < 4 }
-            val sn = inSec.map { n ->
-                val isPlayer = n.lane >= 4
-                val raw = (n.lane % 4) + (if (isPlayer == mustHit) 0 else 4)
+
+        var currentBpm = initialBpm
+        var sectionStart = 0.0
+        var noteIndex = 0
+        var sectionIndex = 0
+
+        while (
+            sectionIndex < MAX_SECTIONS
+        ) {
+            val nextBpm = bpmChanges
+                .lastOrNull {
+                    it.timeMs <= sectionStart + EPSILON
+                }
+                ?.bpm
+                ?.safeBpm()
+                ?: currentBpm
+
+            val bpmChanged = (
+                sectionIndex > 0 &&
+                abs(nextBpm - currentBpm) > EPSILON
+            )
+
+            currentBpm = nextBpm
+
+            val sectionDuration = (
+                STEPS_PER_SECTION / 4.0
+            ) * 60000.0 / currentBpm
+
+            val sectionEnd = (
+                sectionStart + sectionDuration
+            )
+
+            val sectionNotes = mutableListOf<Note>()
+
+            while (
+                noteIndex < sortedNotes.size &&
+                sortedNotes[noteIndex].timeMs <
+                    sectionEnd - EPSILON
+            ) {
+                sectionNotes.add(
+                    sortedNotes[noteIndex]
+                )
+
+                noteIndex++
+            }
+
+            val playerCount = sectionNotes.count {
+                it.lane >= 4
+            }
+
+            val opponentCount = sectionNotes.size -
+                playerCount
+
+            val mustHit = playerCount >= opponentCount
+
+            val encodedNotes = sectionNotes.map { note ->
+                val isPlayer = note.lane >= 4
+
+                val rawLane = (
+                    note.lane % 4
+                ) + if (
+                    isPlayer == mustHit
+                ) {
+                    0
+                } else {
+                    4
+                }
+
                 buildJsonArray {
-                    add(n.timeMs); add(raw); add(n.sustainMs)
-                    if (n.kind.isNotEmpty()) add(n.kind)
+                    add(note.timeMs)
+                    add(rawLane)
+                    add(note.sustainMs)
+
+                    if (note.kind.isNotBlank()) {
+                        add(note.kind)
+                    }
                 }
             }
-            sections += buildJsonObject {
-                put("sectionNotes", JsonArray(sn))
-                put("sectionBeats", 4)
-                put("lengthInSteps", 16)
-                put("mustHitSection", mustHit)
-                put("gfSection", false)
-                put("altAnim", false)
-                put("bpm", bpm)
-                put("changeBPM", changed)
-                put("typeOfSection", 0)
-            }
-            first = false
-            start = end
-        } while (start <= lastMs && sections.size < 20000)
 
-        val evs = chart.events.groupBy { it.timeMs }.toSortedMap().map { (t, list) ->
-            buildJsonArray {
-                add(t)
-                add(buildJsonArray { list.forEach { e -> add(buildJsonArray { add(e.name); add(e.value1); add(e.value2) }) } })
+            sections.add(
+                buildJsonObject {
+                    put(
+                        "sectionNotes",
+                        JsonArray(encodedNotes)
+                    )
+                    put("sectionBeats", 4)
+                    put("lengthInSteps", 16)
+                    put("mustHitSection", mustHit)
+                    put("gfSection", false)
+                    put("altAnim", false)
+                    put("bpm", currentBpm)
+                    put(
+                        "changeBPM",
+                        bpmChanged
+                    )
+                    put("typeOfSection", 0)
+                }
+            )
+
+            sectionIndex++
+            sectionStart = sectionEnd
+
+            if (
+                sectionStart > lastTime &&
+                noteIndex >= sortedNotes.size
+            ) {
+                break
             }
         }
+
+        if (noteIndex < sortedNotes.size) {
+            throw IllegalStateException(
+                "Chart exceeds maximum section count"
+            )
+        }
+
+        val encodedEvents = clean.events
+            .groupBy { it.timeMs }
+            .toSortedMap()
+            .map { (time, group) ->
+                buildJsonArray {
+                    add(time)
+
+                    add(
+                        buildJsonArray {
+                            group.forEach { event ->
+                                add(
+                                    buildJsonArray {
+                                        add(event.name)
+                                        add(event.value1)
+                                        add(event.value2)
+                                    }
+                                )
+                            }
+                        }
+                    )
+                }
+            }
 
         val song = buildJsonObject {
-            put("song", chart.song)
+            put("song", clean.song)
             put("notes", JsonArray(sections))
-            put("events", JsonArray(evs))
-            put("bpm", chart.bpmChanges.first().bpm)
+            put(
+                "events",
+                JsonArray(encodedEvents)
+            )
+            put("bpm", initialBpm)
             put("needsVoices", true)
-            put("speed", chart.speed)
-            put("player1", chart.player1)
-            put("player2", chart.player2)
-            put("gfVersion", chart.gfVersion)
-            put("stage", chart.stage)
+            put("speed", clean.speed)
+            put("player1", clean.player1)
+            put("player2", clean.player2)
+            put("gfVersion", clean.gfVersion)
+            put("stage", clean.stage)
             put("validScore", true)
         }
-        return json.encodeToString(JsonObject.serializer(), buildJsonObject { put("song", song) })
+
+        val root = buildJsonObject {
+            put("song", song)
+        }
+
+        return json.encodeToString(
+            JsonObject.serializer(),
+            root
+        )
     }
 
-    private fun JsonElement?.dbl(def: Double) = (this as? JsonPrimitive)?.doubleOrNull ?: def
-    private fun JsonElement?.str() = (this as? JsonPrimitive)?.contentOrNull.orEmpty()
+    private fun JsonElement?.asObject(): JsonObject? {
+        return this as? JsonObject
+    }
+
+    private fun JsonElement?.asArray(): JsonArray {
+        return this as? JsonArray
+            ?: JsonArray(emptyList())
+    }
+
+    private fun JsonElement?.number(
+        default: Double
+    ): Double {
+        return (this as? JsonPrimitive)
+            ?.doubleOrNull
+            ?: default
+    }
+
+    private fun JsonElement?.boolean(
+        default: Boolean
+    ): Boolean {
+        return (this as? JsonPrimitive)
+            ?.booleanOrNull
+            ?: default
+    }
+
+    private fun JsonElement?.string(): String {
+        return (this as? JsonPrimitive)
+            ?.contentOrNull
+            .orEmpty()
+    }
+
+    private fun Double.safeBpm(): Double {
+        return if (isFinite()) {
+            coerceIn(20.0, 999.0)
+        } else {
+            DEFAULT_BPM
+        }
+    }
+
+    private fun Double.safeSpeed(): Double {
+        return if (isFinite()) {
+            coerceIn(0.1, 10.0)
+        } else {
+            DEFAULT_SPEED
+        }
+    }
 }
