@@ -3,18 +3,19 @@ package com.funkforge.ui
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,7 +47,55 @@ import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.round
 
-private fun fmt(d: Double) = if (d % 1.0 == 0.0) d.toInt().toString() else d.toString()
+private enum class EditorTool {
+    Draw,
+    Select,
+    Erase
+}
+
+private fun editorNumber(value: Double): String {
+    return if (value % 1.0 == 0.0) {
+        value.toInt().toString()
+    } else {
+        value.toString()
+    }
+}
+
+private fun editorTime(ms: Double): String {
+    val total = (ms.coerceAtLeast(0.0) / 1000.0).toInt()
+    return "%02d:%02d".format(total / 60, total % 60)
+}
+
+@Composable
+private fun EditorAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(42.dp)
+            .background(
+                if (selected) Fk.pink.copy(alpha = 0.25f)
+                else Color.White.copy(alpha = 0.05f),
+                RoundedCornerShape(10.dp)
+            )
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = title,
+            tint = when {
+                !enabled -> Color.Gray
+                selected -> Fk.pink
+                else -> Color.White
+            }
+        )
+    }
+}
 
 @Composable
 fun EditorScreen(
@@ -60,160 +109,1083 @@ fun EditorScreen(
     onPickVoices: () -> Unit,
     onPlaytest: () -> Unit
 ) {
-    val ctx = LocalContext.current
-    val chart = project.chart
-    val onChart: (Chart) -> Unit = { onProject(project.copy(chart = it)) }
+    val context = LocalContext.current
     val density = LocalDensity.current.density
     val sprites = rememberSprites()
-    val tm = rememberTextMeasurer()
+    val textMeasurer = rememberTextMeasurer()
+
+    val chart = project.chart
+    val beatMs = chart.beatMs.coerceAtLeast(1.0)
+
     var scroll by remember { mutableFloatStateOf(0f) }
-    var beatPx by remember { mutableFloatStateOf(90f * density) }
-    var bpmText by remember(chart.song) { mutableStateOf(fmt(chart.bpmChanges.first().bpm)) }
-    var showSettings by remember { mutableStateOf(false) }
-    var playing by remember { mutableStateOf(false) }
-    val beatMs = chart.beatMs
-    val stepMs = beatMs / 4.0
-    val headerPx = 64f * density
-    val maxSus = remember(chart.notes) { chart.notes.maxOfOrNull { it.sustainMs } ?: 0.0 }
-
-    val pb = remember { Playback() }
-    DisposableEffect(project.instPath, project.voicesPath) {
-        pb.load(project.instPath, project.voicesPath)
-        onDispose { pb.release() }
+    var beatPx by remember(density) {
+        mutableFloatStateOf(90f * density)
     }
-    LaunchedEffect(playing) {
+
+    var snapDivision by remember {
+        mutableIntStateOf(4)
+    }
+
+    var tool by remember {
+        mutableStateOf(EditorTool.Draw)
+    }
+
+    var selectedNote by remember {
+        mutableStateOf<Note?>(null)
+    }
+
+    var showSettings by remember {
+        mutableStateOf(false)
+    }
+
+    var showProperties by remember {
+        mutableStateOf(false)
+    }
+
+    var playing by remember {
+        mutableStateOf(false)
+    }
+
+    var bpmText by remember(chart.song) {
+        mutableStateOf(
+            editorNumber(chart.bpmChanges.first().bpm)
+        )
+    }
+
+    var speedText by remember(chart.song) {
+        mutableStateOf(editorNumber(chart.speed))
+    }
+
+    val undoStack = remember {
+        mutableStateListOf<Chart>()
+    }
+
+    val redoStack = remember {
+        mutableStateListOf<Chart>()
+    }
+
+    val stepMs = beatMs / snapDivision
+    val headerPx = 68f * density
+
+    val maxSustain = remember(chart.notes) {
+        chart.notes.maxOfOrNull { it.sustainMs } ?: 0.0
+    }
+
+    val playback = remember(
+        context,
+        project.instPath,
+        project.voicesPath
+    ) {
+        Playback(context)
+    }
+
+    var audioLoaded by remember(playback) {
+        mutableStateOf(false)
+    }
+
+    DisposableEffect(playback) {
+        audioLoaded = playback.load(
+            project.instPath,
+            project.voicesPath
+        )
+
+        onDispose {
+            playback.release()
+        }
+    }
+
+    fun notify(message: String) {
+        Toast.makeText(
+            context,
+            message,
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    fun updateChart(next: Chart) {
+        if (next == chart) return
+
+        undoStack.add(chart)
+
+        if (undoStack.size > 50) {
+            undoStack.removeAt(0)
+        }
+
+        redoStack.clear()
+        onProject(project.copy(chart = next))
+    }
+
+    fun undo() {
+        if (undoStack.isEmpty()) return
+
+        val previous = undoStack.removeAt(
+            undoStack.lastIndex
+        )
+
+        redoStack.add(chart)
+        selectedNote = null
+        onProject(project.copy(chart = previous))
+    }
+
+    fun redo() {
+        if (redoStack.isEmpty()) return
+
+        val next = redoStack.removeAt(
+            redoStack.lastIndex
+        )
+
+        undoStack.add(chart)
+        selectedNote = null
+        onProject(project.copy(chart = next))
+    }
+
+    fun replaceNote(old: Note, new: Note) {
+        val index = chart.notes.indexOf(old)
+        if (index < 0) {
+            selectedNote = null
+            return
+        }
+
+        val updated = chart.notes.toMutableList()
+        updated[index] = new
+
+        updateChart(
+            chart.copy(
+                notes = updated.sortedBy { it.timeMs }
+            )
+        )
+
+        selectedNote = new
+    }
+
+    fun removeSelected() {
+        val note = selectedNote ?: return
+
+        updateChart(chart.withoutNote(note))
+        selectedNote = null
+    }
+
+    fun moveSelected(deltaMs: Double) {
+        val note = selectedNote ?: return
+
+        replaceNote(
+            note,
+            note.copy(
+                timeMs = (
+                    note.timeMs + deltaMs
+                ).coerceAtLeast(0.0)
+            )
+        )
+    }
+
+    fun changeSustain(deltaMs: Double) {
+        val note = selectedNote ?: return
+
+        replaceNote(
+            note,
+            note.copy(
+                sustainMs = (
+                    note.sustainMs + deltaMs
+                ).coerceAtLeast(0.0)
+            )
+        )
+    }
+
+    fun pausePreview() {
+        playing = false
+        playback.pause()
+    }
+
+    LaunchedEffect(playing, playback) {
         if (playing) {
-            pb.play(((scroll / beatPx) * beatMs).toInt().coerceAtLeast(0))
-            while (pb.isPlaying) {
-                withFrameNanos { }
-                scroll = (pb.positionMs / beatMs).toFloat() * beatPx
+            if (!audioLoaded) {
+                playing = false
+                return@LaunchedEffect
             }
+
+            playback.play(
+                (
+                    scroll / beatPx * beatMs
+                ).toInt().coerceAtLeast(0)
+            )
+
+            while (playing && playback.isPlaying) {
+                withFrameNanos { }
+
+                playback.synchronize()
+
+                scroll = (
+                    playback.positionMs / beatMs
+                ).toFloat() * beatPx
+            }
+
             playing = false
-        } else pb.pause()
+        } else {
+            playback.pause()
+        }
     }
 
-    if (showSettings) SettingsDialog(project, false, { showSettings = false }) { onProject(it); showSettings = false }
+    if (showSettings) {
+        SettingsDialog(
+            project,
+            false,
+            { showSettings = false }
+        ) {
+            onProject(it)
+            showSettings = false
+        }
+    }
 
-    Column(Modifier.fillMaxSize().background(Fk.bg)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) }
-            Text(chart.song, color = Fk.cyan, fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            IconButton(onClick = onImport) { Icon(Icons.Default.FileOpen, null, tint = Color.White) }
-            IconButton(onClick = onExportJson) { Icon(Icons.Default.Save, null, tint = Color.White) }
-            IconButton(onClick = onExportMod) { Icon(Icons.Default.Share, null, tint = Fk.pink) }
+    if (showProperties) {
+        AlertDialog(
+            onDismissRequest = {
+                showProperties = false
+            },
+            title = {
+                Text("Chart Properties")
+            },
+            text = {
+                Column(
+                    verticalArrangement =
+                        Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = bpmText,
+                        onValueChange = {
+                            bpmText = it
+                        },
+                        label = {
+                            Text("BPM")
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Decimal
+                        )
+                    )
+
+                    OutlinedTextField(
+                        value = speedText,
+                        onValueChange = {
+                            speedText = it
+                        },
+                        label = {
+                            Text("Scroll Speed")
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Decimal
+                        )
+                    )
+
+                    Text(
+                        "Song: ${chart.song}",
+                        color = Fk.cyan
+                    )
+
+                    Text(
+                        "Notes: ${chart.notes.size}",
+                        color = Color.White
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val bpm = bpmText.toDoubleOrNull()
+                        val speed = speedText.toDoubleOrNull()
+
+                        if (
+                            bpm == null ||
+                            bpm !in 20.0..999.0 ||
+                            speed == null ||
+                            speed !in 0.1..10.0
+                        ) {
+                            notify("Invalid BPM or speed")
+                        } else {
+                            updateChart(
+                                chart.copy(
+                                    bpmChanges = listOf(
+                                        BpmChange(0.0, bpm)
+                                    ) + chart.bpmChanges.drop(1),
+                                    speed = speed
+                                )
+                            )
+
+                            showProperties = false
+                        }
+                    }
+                ) {
+                    Text("SAVE")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showProperties = false
+                    }
+                ) {
+                    Text("CANCEL")
+                }
+            }
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Fk.bg)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF190C2D))
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            EditorAction(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                "Back"
+            ) {
+                pausePreview()
+                onBack()
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = chart.song.uppercase(),
+                    color = Fk.cyan,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 17.sp,
+                    maxLines = 1
+                )
+
+                Text(
+                    text = "FUNKFORGE • CHART EDITOR",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 10.sp
+                )
+            }
+
+            EditorAction(
+                Icons.Default.Undo,
+                "Undo",
+                enabled = undoStack.isNotEmpty()
+            ) {
+                undo()
+            }
+
+            Spacer(Modifier.width(4.dp))
+
+            EditorAction(
+                Icons.Default.Redo,
+                "Redo",
+                enabled = redoStack.isNotEmpty()
+            ) {
+                redo()
+            }
+
+            Spacer(Modifier.width(4.dp))
+
+            EditorAction(
+                Icons.Default.Settings,
+                "Project Settings"
+            ) {
+                showSettings = true
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(6.dp),
+            horizontalArrangement =
+                Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            EditorAction(
+                Icons.Default.Edit,
+                "Draw",
+                selected = tool == EditorTool.Draw
+            ) {
+                tool = EditorTool.Draw
+            }
+
+            EditorAction(
+                Icons.Default.TouchApp,
+                "Select",
+                selected = tool == EditorTool.Select
+            ) {
+                tool = EditorTool.Select
+            }
+
+            EditorAction(
+                Icons.Default.Delete,
+                "Erase",
+                selected = tool == EditorTool.Erase
+            ) {
+                tool = EditorTool.Erase
+            }
+
+            VerticalDivider(
+                modifier = Modifier.height(28.dp),
+                color = Color.White.copy(alpha = 0.2f)
+            )
+
+            Text(
+                "SNAP",
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 11.sp
+            )
+
+            listOf(4, 8, 16, 32).forEach { division ->
+                Box(
+                    modifier = Modifier
+                        .background(
+                            if (snapDivision == division) {
+                                Fk.pink
+                            } else {
+                                Color(0xFF2C1945)
+                            },
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable {
+                            snapDivision = division
+                        }
+                        .padding(
+                            horizontal = 10.dp,
+                            vertical = 9.dp
+                        )
+                ) {
+                    Text(
+                        text = "1/$division",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            VerticalDivider(
+                modifier = Modifier.height(28.dp),
+                color = Color.White.copy(alpha = 0.2f)
+            )
+
+            EditorAction(
+                Icons.Default.Remove,
+                "Zoom Out"
+            ) {
+                beatPx = (
+                    beatPx * 0.8f
+                ).coerceAtLeast(28f * density)
+            }
+
+            Text(
+                "${(beatPx / density).toInt()}px",
+                color = Fk.cyan,
+                fontSize = 11.sp
+            )
+
+            EditorAction(
+                Icons.Default.Add,
+                "Zoom In"
+            ) {
+                beatPx = (
+                    beatPx * 1.25f
+                ).coerceAtMost(300f * density)
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF130923))
+                .padding(
+                    horizontal = 12.dp,
+                    vertical = 5.dp
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement =
+                Arrangement.SpaceBetween
+        ) {
+            Text(
+                "BEAT ${editorNumber(scroll / beatPx.toDouble())}",
+                color = Fk.cyan,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                editorTime(
+                    scroll / beatPx.toDouble() * beatMs
+                ),
+                color = Color.White,
+                fontSize = 12.sp
+            )
+
+            Text(
+                "BPM ${editorNumber(chart.bpmChanges.first().bpm)}",
+                color = Fk.yellow,
+                fontSize = 11.sp
+            )
+
+            Text(
+                "${chart.notes.size} NOTES",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 11.sp
+            )
         }
 
         Canvas(
-            Modifier.weight(1f).fillMaxWidth()
-                .pointerInput(Unit) {
-                    detectVerticalDragGestures { _, dy -> if (!playing) scroll = (scroll - dy).coerceAtLeast(0f) }
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .pointerInput(playing) {
+                    detectVerticalDragGestures { _, delta ->
+                        if (!playing) {
+                            scroll = (
+                                scroll - delta
+                            ).coerceAtLeast(0f)
+                        }
+                    }
                 }
-                .pointerInput(chart, scroll, beatPx) {
-                    detectTapGestures { p ->
-                        if (p.y > headerPx) {
-                            val lane = (p.x / (size.width / 8f)).toInt().coerceIn(0, 7)
-                            val t = (p.y - headerPx + scroll) / beatPx * beatMs
-                            val snapped = (round(t / stepMs) * stepMs).coerceAtLeast(0.0)
-                            val existing = chart.notes.firstOrNull { it.lane == lane && abs(it.timeMs - snapped) < stepMs / 2 }
-                            onChart(if (existing != null) chart.withoutNote(existing) else chart.withNote(Note(snapped, lane)))
+                .pointerInput(
+                    chart,
+                    scroll,
+                    beatPx,
+                    snapDivision,
+                    tool
+                ) {
+                    detectTapGestures { position ->
+                        if (
+                            playing ||
+                            position.y <= headerPx
+                        ) return@detectTapGestures
+
+                        val laneWidth = size.width / 8f
+
+                        val lane = (
+                            position.x / laneWidth
+                        ).toInt().coerceIn(0, 7)
+
+                        val time = (
+                            position.y -
+                            headerPx +
+                            scroll
+                        ) / beatPx * beatMs
+
+                        val snapped = (
+                            round(time / stepMs) * stepMs
+                        ).coerceAtLeast(0.0)
+
+                        val nearby = chart.notes
+                            .filter {
+                                it.lane == lane &&
+                                    abs(it.timeMs - snapped) <=
+                                    stepMs * 0.5
+                            }
+                            .minByOrNull {
+                                abs(it.timeMs - snapped)
+                            }
+
+                        when (tool) {
+                            EditorTool.Draw -> {
+                                if (nearby != null) {
+                                    selectedNote = nearby
+                                    tool = EditorTool.Select
+                                } else {
+                                    val note = Note(
+                                        timeMs = snapped,
+                                        lane = lane
+                                    )
+
+                                    updateChart(
+                                        chart.withNote(note)
+                                    )
+
+                                    selectedNote = note
+                                }
+                            }
+
+                            EditorTool.Select -> {
+                                selectedNote = nearby
+                            }
+
+                            EditorTool.Erase -> {
+                                if (nearby != null) {
+                                    updateChart(
+                                        chart.withoutNote(nearby)
+                                    )
+
+                                    if (selectedNote == nearby) {
+                                        selectedNote = null
+                                    }
+                                }
+                            }
                         }
                     }
                 }
         ) {
-            val laneW = size.width / 8f
-            val ns = min(laneW * 0.92f, 56f * density)
-            fun yOf(ms: Double) = headerPx + (ms / beatMs).toFloat() * beatPx - scroll
+            val laneWidth = size.width / 8f
+            val noteSize = min(
+                laneWidth * 0.92f,
+                56f * density
+            )
+
+            fun yOf(ms: Double): Float {
+                return headerPx +
+                    (ms / beatMs).toFloat() * beatPx -
+                    scroll
+            }
 
             clipRect(top = headerPx) {
-                for (i in 0 until 8) {
+                for (lane in 0 until 8) {
                     drawRect(
-                        if (i < 4) Color(0xFF1E0D38) else Color(0xFF241046),
-                        Offset(i * laneW, headerPx), Size(laneW, size.height - headerPx)
+                        color = if (lane < 4) {
+                            Color(0xFF1C1032)
+                        } else {
+                            Color(0xFF271341)
+                        },
+                        topLeft = Offset(
+                            lane * laneWidth,
+                            headerPx
+                        ),
+                        size = Size(
+                            laneWidth,
+                            (size.height - headerPx)
+                                .coerceAtLeast(0f)
+                        )
                     )
-                    if (i % 4 != 0) drawLine(Color.White.copy(alpha = 0.05f), Offset(i * laneW, headerPx), Offset(i * laneW, size.height))
-                }
-                val first = floor(scroll / beatPx).toInt().coerceAtLeast(0)
-                val last = ceil((scroll + size.height) / beatPx).toInt()
-                for (b in first..last) {
-                    val y = headerPx + b * beatPx - scroll
-                    val measure = b % 4 == 0
-                    drawLine(Color.White.copy(alpha = if (measure) 0.35f else 0.15f), Offset(0f, y), Offset(size.width, y), if (measure) 3f else 1.5f)
-                    for (s in 1..3) {
-                        val ys = y + s * beatPx / 4f
-                        drawLine(Color.White.copy(alpha = 0.04f), Offset(0f, ys), Offset(size.width, ys))
-                    }
-                    if (measure) drawText(tm, "${b / 4}", Offset(6f, y + 4f), TextStyle(color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp))
-                }
-                drawLine(Fk.pink, Offset(size.width / 2f, headerPx), Offset(size.width / 2f, size.height), 4f)
 
-                // só desenha as notas visíveis (busca binária) — não trava com milhares de notas
-                val msLo = (scroll - ns) / beatPx * beatMs - maxSus
-                val msHi = (scroll + size.height - headerPx + ns) / beatPx * beatMs
-                val notes = chart.notes
-                var i = notes.lowerBound(msLo)
-                while (i < notes.size && notes[i].timeMs <= msHi) {
-                    val n = notes[i]
-                    i++
-                    val y = yOf(n.timeMs)
-                    val cx = n.lane * laneW + laneW / 2f
-                    if (n.sustainMs > 0) {
-                        drawRect(Fk.lane[n.lane % 4].copy(alpha = 0.6f), Offset(cx - ns * 0.12f, y), Size(ns * 0.24f, yOf(n.timeMs + n.sustainMs) - y))
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.08f),
+                        start = Offset(
+                            lane * laneWidth,
+                            headerPx
+                        ),
+                        end = Offset(
+                            lane * laneWidth,
+                            size.height
+                        )
+                    )
+                }
+
+                val firstBeat = floor(
+                    scroll / beatPx
+                ).toInt().coerceAtLeast(0)
+
+                val lastBeat = ceil(
+                    (scroll + size.height) / beatPx
+                ).toInt()
+
+                for (beat in firstBeat..lastBeat) {
+                    val y = headerPx +
+                        beat * beatPx -
+                        scroll
+
+                    val measure = beat % 4 == 0
+
+                    drawLine(
+                        color = Color.White.copy(
+                            alpha = if (measure) 0.4f else 0.16f
+                        ),
+                        start = Offset(0f, y),
+                        end = Offset(size.width, y),
+                        strokeWidth = if (measure) 2.5f else 1f
+                    )
+
+                    for (step in 1 until snapDivision) {
+                        val stepY = y +
+                            step * beatPx / snapDivision
+
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.045f),
+                            start = Offset(0f, stepY),
+                            end = Offset(size.width, stepY)
+                        )
                     }
+
+                    if (measure) {
+                        drawText(
+                            textMeasurer,
+                            "${beat / 4}",
+                            Offset(5f, y + 3f),
+                            TextStyle(
+                                color = Color.White.copy(alpha = 0.55f),
+                                fontSize = 11.sp
+                            )
+                        )
+                    }
+                }
+
+                drawLine(
+                    color = Fk.pink,
+                    start = Offset(
+                        size.width / 2f,
+                        headerPx
+                    ),
+                    end = Offset(
+                        size.width / 2f,
+                        size.height
+                    ),
+                    strokeWidth = 3f
+                )
+
+                val lowerMs = (
+                    scroll - noteSize
+                ) / beatPx * beatMs - maxSustain
+
+                val upperMs = (
+                    scroll +
+                    size.height -
+                    headerPx +
+                    noteSize
+                ) / beatPx * beatMs
+
+                var index = chart.notes.lowerBound(lowerMs)
+
+                while (
+                    index < chart.notes.size &&
+                    chart.notes[index].timeMs <= upperMs
+                ) {
+                    val note = chart.notes[index]
+                    index++
+
+                    if (note.lane !in 0..7) continue
+
+                    val y = yOf(note.timeMs)
+                    val centerX = note.lane * laneWidth +
+                        laneWidth / 2f
+
+                    val selected = selectedNote == note
+
+                    if (note.sustainMs > 0.0) {
+                        val endY = yOf(
+                            note.timeMs + note.sustainMs
+                        )
+
+                        drawRect(
+                            color = Fk.lane[
+                                note.lane % 4
+                            ].copy(
+                                alpha = if (selected) 1f else 0.65f
+                            ),
+                            topLeft = Offset(
+                                centerX - noteSize * 0.12f,
+                                y
+                            ),
+                            size = Size(
+                                noteSize * 0.24f,
+                                (endY - y).coerceAtLeast(0f)
+                            )
+                        )
+                    }
+
+                    if (selected) {
+                        drawRect(
+                            color = Fk.yellow,
+                            topLeft = Offset(
+                                centerX - noteSize * 0.57f,
+                                y - noteSize * 0.57f
+                            ),
+                            size = Size(
+                                noteSize * 1.14f,
+                                noteSize * 1.14f
+                            )
+                        )
+                    }
+
                     drawImage(
-                        sprites.notes[n.lane % 4],
-                        dstOffset = IntOffset((cx - ns / 2f).toInt(), (y - ns / 2f).toInt()),
-                        dstSize = IntSize(ns.toInt(), ns.toInt())
+                        image = sprites.notes[note.lane % 4],
+                        dstOffset = IntOffset(
+                            (centerX - noteSize / 2f).toInt(),
+                            (y - noteSize / 2f).toInt()
+                        ),
+                        dstSize = IntSize(
+                            noteSize.toInt().coerceAtLeast(1),
+                            noteSize.toInt().coerceAtLeast(1)
+                        )
                     )
                 }
             }
 
-            drawRect(Fk.bg, Offset(0f, 0f), Size(size.width, headerPx))
-            for (i in 0 until 8) {
-                val cx = i * laneW + laneW / 2f
+            drawRect(
+                color = Fk.bg,
+                topLeft = Offset.Zero,
+                size = Size(size.width, headerPx)
+            )
+
+            for (lane in 0 until 8) {
+                val centerX = lane * laneWidth +
+                    laneWidth / 2f
+
                 drawImage(
-                    sprites.statics[i % 4],
-                    dstOffset = IntOffset((cx - ns / 2f).toInt(), ((headerPx - ns) / 2f).toInt()),
-                    dstSize = IntSize(ns.toInt(), ns.toInt()),
-                    alpha = if (i < 4) 0.7f else 1f
+                    image = sprites.statics[lane % 4],
+                    dstOffset = IntOffset(
+                        (centerX - noteSize / 2f).toInt(),
+                        ((headerPx - noteSize) / 2f).toInt()
+                    ),
+                    dstSize = IntSize(
+                        noteSize.toInt().coerceAtLeast(1),
+                        noteSize.toInt().coerceAtLeast(1)
+                    ),
+                    alpha = if (lane < 4) 0.7f else 1f
                 )
             }
-            drawLine(Fk.cyan, Offset(0f, headerPx), Offset(size.width, headerPx), 3f)
+
+            drawLine(
+                color = Fk.cyan,
+                start = Offset(0f, headerPx),
+                end = Offset(size.width, headerPx),
+                strokeWidth = 3f
+            )
         }
 
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            IconButton(onClick = {
-                if (!pb.hasAudio) Toast.makeText(ctx, "Importe a música (Inst) primeiro 🎵", Toast.LENGTH_SHORT).show()
-                else playing = !playing
-            }) { Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Fk.yellow) }
-            IconButton(onClick = onPickInst) { Icon(Icons.Default.MusicNote, null, tint = if (project.instPath != null) Fk.cyan else Color.White) }
-            IconButton(onClick = onPickVoices) { Icon(Icons.Default.RecordVoiceOver, null, tint = if (project.voicesPath != null) Fk.cyan else Color.White) }
-            IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, null, tint = Color.White) }
-            Button(onClick = { playing = false; onPlaytest() }) {
-                Icon(Icons.Default.SportsEsports, null); Spacer(Modifier.width(6.dp)); Text("Testar")
+        if (selectedNote != null) {
+            val note = selectedNote!!
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF25143C))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "SELECTED NOTE",
+                        color = Fk.yellow,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    Text(
+                        "Lane ${note.lane + 1} • ${editorNumber(note.timeMs)}ms",
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
+
+                    IconButton(
+                        onClick = {
+                            selectedNote = null
+                        },
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Deselect",
+                            tint = Color.White
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement =
+                        Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "TIME",
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
+
+                    EditorAction(
+                        Icons.Default.Remove,
+                        "Move Earlier"
+                    ) {
+                        moveSelected(-stepMs)
+                    }
+
+                    EditorAction(
+                        Icons.Default.Add,
+                        "Move Later"
+                    ) {
+                        moveSelected(stepMs)
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    Text(
+                        "SUSTAIN ${editorNumber(note.sustainMs)}ms",
+                        color = Fk.cyan,
+                        fontSize = 11.sp
+                    )
+
+                    EditorAction(
+                        Icons.Default.Remove,
+                        "Shorten Sustain"
+                    ) {
+                        changeSustain(-stepMs)
+                    }
+
+                    EditorAction(
+                        Icons.Default.Add,
+                        "Extend Sustain"
+                    ) {
+                        changeSustain(stepMs)
+                    }
+
+                    EditorAction(
+                        Icons.Default.Delete,
+                        "Delete Note"
+                    ) {
+                        removeSelected()
+                    }
+                }
             }
         }
+
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF190C2D))
+                .padding(6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement =
+                Arrangement.spacedBy(6.dp)
         ) {
-            Text("${chart.notes.size} notas", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, modifier = Modifier.weight(1f))
-            OutlinedTextField(
-                value = bpmText,
-                onValueChange = { s ->
-                    bpmText = s
-                    val v = s.toDoubleOrNull()
-                    if (v != null && v in 20.0..999.0) {
-                        onChart(chart.copy(bpmChanges = listOf(BpmChange(0.0, v)) + chart.bpmChanges.drop(1)))
-                    }
+            EditorAction(
+                Icons.Default.SkipPrevious,
+                "Previous Beat"
+            ) {
+                pausePreview()
+                scroll = (
+                    scroll - beatPx
+                ).coerceAtLeast(0f)
+            }
+
+            EditorAction(
+                if (playing) {
+                    Icons.Default.Pause
+                } else {
+                    Icons.Default.PlayArrow
                 },
-                label = { Text("BPM (20–999)") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.width(140.dp)
-            )
-            IconButton(onClick = { beatPx = (beatPx * 0.8f).coerceAtLeast(30f * density) }) { Icon(Icons.Default.Remove, null, tint = Color.White) }
-            IconButton(onClick = { beatPx = (beatPx * 1.25f).coerceAtMost(300f * density) }) { Icon(Icons.Default.Add, null, tint = Color.White) }
+                if (playing) "Pause" else "Play",
+                selected = playing
+            ) {
+                if (!audioLoaded) {
+                    notify("Import Inst or Voices first")
+                } else {
+                    playing = !playing
+                }
+            }
+
+            EditorAction(
+                Icons.Default.Stop,
+                "Stop"
+            ) {
+                pausePreview()
+                playback.stop()
+            }
+
+            EditorAction(
+                Icons.Default.SkipNext,
+                "Next Beat"
+            ) {
+                pausePreview()
+                scroll += beatPx
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            EditorAction(
+                Icons.Default.MusicNote,
+                "Import Inst",
+                selected = project.instPath != null
+            ) {
+                pausePreview()
+                onPickInst()
+            }
+
+            EditorAction(
+                Icons.Default.RecordVoiceOver,
+                "Import Voices",
+                selected = project.voicesPath != null
+            ) {
+                pausePreview()
+                onPickVoices()
+            }
+
+            EditorAction(
+                Icons.Default.Tune,
+                "Chart Properties"
+            ) {
+                showProperties = true
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+            horizontalArrangement =
+                Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = onImport
+            ) {
+                Icon(
+                    Icons.Default.FileOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("IMPORT")
+            }
+
+            OutlinedButton(
+                onClick = onExportJson
+            ) {
+                Icon(
+                    Icons.Default.Save,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("JSON")
+            }
+
+            OutlinedButton(
+                onClick = onExportMod
+            ) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("EXPORT MOD")
+            }
+
+            Button(
+                onClick = {
+                    pausePreview()
+                    onPlaytest()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Fk.pink
+                )
+            ) {
+                Icon(
+                    Icons.Default.SportsEsports,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("PLAYTEST")
+            }
         }
     }
 }
