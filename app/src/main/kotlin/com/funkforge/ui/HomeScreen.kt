@@ -1,52 +1,15 @@
 package com.funkforge.ui
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.FileOpen
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,26 +18,22 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.random.Random
 
-private data class HomeParticle(
+private data class MenuParticle(
     val x: Float,
-    val speed: Float,
     val phase: Float,
-    val lane: Int,
-    val size: Int,
-    val drift: Float,
-    val opacity: Float
+    val speed: Float,
+    val size: Float,
+    val color: Int
 )
 
 @Composable
@@ -84,79 +43,80 @@ fun HomeScreen(
     onNew: () -> Unit,
     onImport: () -> Unit,
     onSecret: () -> Unit,
-    onSoon: (String) -> Unit
+    onSoon: (String) -> Unit,
+    onOptions: () -> Unit = {}
 ) {
-    val sprites = rememberSprites()
-    val density = LocalDensity.current.density
+    val context = LocalContext.current
+    val preferences = remember {
+        context.getSharedPreferences(
+            "funkforge_options",
+            0
+        )
+    }
+
+    var reducedMotion by remember {
+        mutableStateOf(
+            preferences.getBoolean("reduced_motion", false)
+        )
+    }
 
     val particles = remember {
-        List(26) {
-            HomeParticle(
+        List(24) {
+            MenuParticle(
                 x = Random.nextFloat(),
-                speed = 0.4f + Random.nextFloat() * 1.3f,
                 phase = Random.nextFloat(),
-                lane = Random.nextInt(4),
-                size = Random.nextInt(22, 52),
-                drift = Random.nextFloat() * 2f - 1f,
-                opacity = 0.08f + Random.nextFloat() * 0.14f
+                speed = 0.4f + Random.nextFloat(),
+                size = 2f + Random.nextFloat() * 4f,
+                color = Random.nextInt(3)
             )
         }
     }
 
     val transition = rememberInfiniteTransition(
-        label = "homeAnimation"
+        label = "home"
     )
 
-    val time by transition.animateFloat(
+    val animation by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(
-                durationMillis = 16000,
+                16000,
                 easing = LinearEasing
             )
         ),
-        label = "particleTime"
+        label = "background"
     )
 
-    val beat by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 4f,
+    val pulse by transition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.04f,
         animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = 1800,
-                easing = LinearEasing
-            )
-        ),
-        label = "noteBeat"
-    )
-
-    val glow by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.65f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = 1800,
-                easing = FastOutSlowInEasing
-            ),
+            animation = tween(1100),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "backgroundGlow"
+        label = "logoPulse"
     )
 
-    var taps by remember {
+    var secretTaps by remember {
         mutableIntStateOf(0)
     }
+
+    val colors = listOf(
+        Fk.pink,
+        Fk.cyan,
+        Fk.purple
+    )
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
+                    listOf(
+                        Color(0xFF10071E),
                         Fk.bg,
-                        Fk.bg2,
-                        Fk.bg
+                        Color(0xFF251043)
                     )
                 )
             )
@@ -164,79 +124,67 @@ fun HomeScreen(
         Canvas(
             modifier = Modifier.fillMaxSize()
         ) {
-            val pinkCenter = Offset(
-                size.width * 0.15f,
-                size.height * 0.25f
-            )
-
-            val cyanCenter = Offset(
-                size.width * 0.85f,
-                size.height * 0.75f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    listOf(
+                        Fk.pink.copy(alpha = 0.16f),
+                        Color.Transparent
+                    ),
+                    center = Offset(
+                        size.width * 0.1f,
+                        size.height * 0.25f
+                    ),
+                    radius = size.width
+                ),
+                center = Offset(
+                    size.width * 0.1f,
+                    size.height * 0.25f
+                ),
+                radius = size.width
             )
 
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(
-                        Fk.pink.copy(alpha = glow * 0.25f),
+                    listOf(
+                        Fk.cyan.copy(alpha = 0.10f),
                         Color.Transparent
                     ),
-                    center = pinkCenter,
-                    radius = size.width * 0.8f
-                ),
-                radius = size.width * 0.8f,
-                center = pinkCenter
-            )
-
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Fk.cyan.copy(alpha = glow * 0.2f),
-                        Color.Transparent
+                    center = Offset(
+                        size.width * 0.9f,
+                        size.height * 0.8f
                     ),
-                    center = cyanCenter,
-                    radius = size.width * 0.75f
+                    radius = size.width
                 ),
-                radius = size.width * 0.75f,
-                center = cyanCenter
+                center = Offset(
+                    size.width * 0.9f,
+                    size.height * 0.8f
+                ),
+                radius = size.width
             )
 
             particles.forEach { particle ->
-                val pixelSize = (
-                    particle.size * density
-                ).toInt()
-
-                val progress = (
-                    time * particle.speed + particle.phase
-                ) % 1f
+                val progress = if (reducedMotion) {
+                    particle.phase
+                } else {
+                    (
+                        animation * particle.speed +
+                        particle.phase
+                    ) % 1f
+                }
 
                 val wave = sin(
-                    progress * PI.toFloat() * 2f
-                ) * particle.drift * 20f * density
+                    progress * PI * 2.0
+                ).toFloat() * 15f
 
-                val x = (
-                    particle.x *
-                    (size.width - pixelSize) + wave
-                ).coerceIn(
-                    0f,
-                    (size.width - pixelSize).coerceAtLeast(0f)
-                )
-
-                val y = size.height -
-                    progress * (size.height + pixelSize)
-
-                drawImage(
-                    image = sprites.notes[particle.lane],
-                    dstOffset = IntOffset(
-                        x.toInt(),
-                        y.toInt()
+                drawCircle(
+                    color = colors[particle.color].copy(
+                        alpha = 0.25f
                     ),
-                    dstSize = IntSize(
-                        pixelSize,
-                        pixelSize
-                    ),
-                    alpha = (
-                        particle.opacity + glow * 0.05f
-                    ).coerceIn(0f, 1f)
+                    radius = particle.size,
+                    center = Offset(
+                        particle.x * size.width + wave,
+                        size.height * (1f - progress)
+                    )
                 )
             }
         }
@@ -246,215 +194,252 @@ fun HomeScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(
-                    horizontal = 22.dp,
-                    vertical = 28.dp
+                    horizontal = 18.dp,
+                    vertical = 16.dp
                 ),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            HomeVersionBadge()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Fk.cyan.copy(alpha = 0.12f),
+                    border = BorderStroke(
+                        1.dp,
+                        Fk.cyan.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Text(
+                        text = "FUNKFORGE  •  V0.1",
+                        modifier = Modifier.padding(
+                            horizontal = 13.dp,
+                            vertical = 8.dp
+                        ),
+                        color = Fk.cyan,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        letterSpacing = 1.sp
+                    )
+                }
 
-            Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.weight(1f))
 
-            HomeNoteHeader(
-                notes = sprites.notes,
-                beat = beat
-            )
+                IconButton(
+                    onClick = onOptions,
+                    modifier = Modifier
+                        .background(
+                            Fk.surfaceVariant,
+                            RoundedCornerShape(14.dp)
+                        )
+                ) {
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Options",
+                        tint = Fk.cyan
+                    )
+                }
+            }
 
             Spacer(Modifier.height(22.dp))
 
+            Row(
+                horizontalArrangement =
+                    Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val sprites = rememberSprites()
+
+                repeat(4) { index ->
+                    Image(
+                        bitmap = sprites.notes[index],
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(53.dp)
+                            .scale(
+                                if (reducedMotion) 1f
+                                else if (
+                                    (animation * 16).toInt() % 4 == index
+                                ) pulse
+                                else 0.95f
+                            )
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(15.dp))
+
             Text(
                 text = "FunkForge",
-                style = MaterialTheme.typography.displayMedium.copy(
-                    brush = Brush.horizontalGradient(
-                        colors = listOf(
-                            Fk.cyan,
-                            Fk.pink
-                        )
-                    ),
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = (-1.5).sp
-                ),
+                color = Color.White,
+                fontSize = 43.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-2).sp,
                 modifier = Modifier.clickable {
-                    taps++
+                    secretTaps++
 
-                    if (taps >= 7) {
-                        taps = 0
+                    if (secretTaps >= 7) {
+                        secretTaps = 0
                         onSecret()
                     }
                 }
             )
 
-            Spacer(Modifier.height(8.dp))
-
             Text(
-                text = "Create. Edit. Remix.",
-                color = Color.White,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp
+                text = "CREATE • EDIT • REMIX",
+                color = Fk.cyan,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp
             )
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(9.dp))
 
             Text(
-                text = "Your Friday Night Funkin' modding studio, right in your pocket.",
+                text = "Your Friday Night Funkin' creation studio.",
                 color = Fk.textSecondary,
                 fontSize = 13.sp,
-                textAlign = TextAlign.Center,
-                lineHeight = 20.sp
+                textAlign = TextAlign.Center
             )
 
-            Spacer(Modifier.height(34.dp))
+            Spacer(Modifier.height(25.dp))
 
-            HomeSectionHeader(
-                title = "YOUR WORKSPACE"
+            HomeHeading(
+                "WORKSPACE",
+                Icons.Default.Dashboard
             )
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
+
+            HomeTile(
+                icon = Icons.Default.Edit,
+                title = "Chart Editor",
+                description = if (hasProject) {
+                    "Open your current chart and continue editing"
+                } else {
+                    "Create your first chart and start editing"
+                },
+                color = Fk.pink,
+                featured = true,
+                onClick = {
+                    if (hasProject) onContinue()
+                    else onNew()
+                }
+            )
+
+            Spacer(Modifier.height(10.dp))
 
             if (hasProject) {
-                HomeMenuCard(
-                    icon = Icons.Default.PlayArrow,
+                HomeTile(
+                    icon = Icons.Default.FolderOpen,
                     title = "Continue Project",
-                    subtitle = "Pick up where you left off",
-                    accent = Fk.yellow,
+                    description = "Resume your saved FunkForge project",
+                    color = Fk.yellow,
                     onClick = onContinue
                 )
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
             }
 
-            HomeMenuCard(
-                icon = Icons.Default.Add,
+            HomeTile(
+                icon = Icons.Default.AddCircle,
                 title = "New Project",
-                subtitle = "Start creating your next mod",
-                accent = Fk.pink,
+                description = "Create a song and configure your mod",
+                color = Fk.purple,
                 onClick = onNew
             )
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(18.dp))
 
-            HomeMenuCard(
+            HomeHeading(
+                "TOOLS",
+                Icons.Default.Build
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            HomeTile(
                 icon = Icons.Default.FileOpen,
                 title = "Import Chart",
-                subtitle = "Open a Psych Engine JSON chart",
-                accent = Fk.cyan,
+                description = "Import a Psych Engine JSON chart",
+                color = Fk.cyan,
                 onClick = onImport
             )
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
 
-            HomeMenuCard(
+            HomeTile(
+                icon = Icons.Default.Folder,
+                title = "Mod Playtest",
+                description = "Open a mod folder and test its songs",
+                color = Fk.green,
+                onClick = {
+                    onSoon("Open Mod Folder")
+                }
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            HomeTile(
                 icon = Icons.Default.SwapHoriz,
                 title = "Funky Maker Converter",
-                subtitle = "Coming soon",
-                accent = Fk.green,
+                description = "Conversion tools • Coming soon",
+                color = Fk.yellow,
                 onClick = {
                     onSoon(
-                        "Coming soon! A sample Funky Maker mod is needed."
+                        "Funky Maker Converter is coming soon"
                     )
                 }
             )
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(18.dp))
 
-            HomeMenuCard(
+            HomeHeading(
+                "MORE",
+                Icons.Default.AutoAwesome
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            HomeTile(
                 icon = Icons.Default.Star,
                 title = "Secret Zone",
-                subtitle = "Discover something mysterious",
-                accent = Fk.yellow,
+                description = "Discover hidden FunkForge content",
+                color = Fk.purple,
                 onClick = onSecret
             )
 
-            Spacer(Modifier.height(30.dp))
+            Spacer(Modifier.height(25.dp))
 
-            HomeFooter()
+            Text(
+                text = "MADE FOR MOBILE • KEEP FUNKIN'",
+                color = Fk.textMuted,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(12.dp))
         }
     }
 }
 
 @Composable
-private fun HomeVersionBadge() {
-    val shape = RoundedCornerShape(50)
-
-    Box(
-        modifier = Modifier
-            .clip(shape)
-            .background(
-                Fk.cyan.copy(alpha = 0.1f)
-            )
-            .border(
-                width = 1.dp,
-                color = Fk.cyan.copy(alpha = 0.35f),
-                shape = shape
-            )
-            .padding(
-                horizontal = 16.dp,
-                vertical = 7.dp
-            )
-    ) {
-        Text(
-            text = "FUNKFORGE  •  V0.1",
-            color = Fk.cyan,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 2.sp
-        )
-    }
-}
-
-@Composable
-private fun HomeNoteHeader(
-    notes: List<androidx.compose.ui.graphics.ImageBitmap>,
-    beat: Float
-) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val active = beat.toInt().coerceIn(0, 3)
-
-        repeat(minOf(4, notes.size)) { index ->
-            val targetScale = if (index == active) {
-                1.22f
-            } else {
-                0.94f
-            }
-
-            val scale by animateFloatAsState(
-                targetValue = targetScale,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium
-                ),
-                label = "noteScale$index"
-            )
-
-            Image(
-                bitmap = notes[index],
-                contentDescription = null,
-                modifier = Modifier
-                    .size(62.dp)
-                    .scale(scale)
-            )
-        }
-    }
-}
-
-@Composable
-private fun HomeSectionHeader(
-    title: String
+private fun HomeHeading(
+    title: String,
+    icon: ImageVector
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            imageVector = Icons.Default.Star,
+            icon,
             contentDescription = null,
             tint = Fk.yellow,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(17.dp)
         )
 
         Spacer(Modifier.width(8.dp))
@@ -464,106 +449,81 @@ private fun HomeSectionHeader(
             color = Fk.textSecondary,
             fontWeight = FontWeight.Bold,
             fontSize = 12.sp,
-            letterSpacing = 1.5.sp
+            letterSpacing = 1.4.sp
         )
     }
 }
 
 @Composable
-private fun HomeMenuCard(
+private fun HomeTile(
     icon: ImageVector,
     title: String,
-    subtitle: String,
-    accent: Color,
+    description: String,
+    color: Color,
+    featured: Boolean = false,
     onClick: () -> Unit
 ) {
-    val shape = RoundedCornerShape(20.dp)
-
-    val interactionSource = remember {
-        MutableInteractionSource()
-    }
-
-    val pressed by interactionSource.collectIsPressedAsState()
-
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "cardScale"
-    )
-
-    val backgroundColor: Color by animateColorAsState(
-        targetValue = if (pressed) {
-            Fk.purple.copy(alpha = 0.3f)
-        } else {
-            Fk.surface.copy(alpha = 0.9f)
-        },
-        animationSpec = tween(
-            durationMillis = 180
-        ),
-        label = "cardBackground"
-    )
-
-    val borderColor: Color by animateColorAsState(
-        targetValue = accent.copy(
-            alpha = if (pressed) 0.9f else 0.35f
-        ),
-        animationSpec = tween(
-            durationMillis = 180
-        ),
-        label = "cardBorder"
-    )
+    val shape = RoundedCornerShape(18.dp)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .scale(scale)
             .clip(shape)
-            .background(backgroundColor)
+            .background(
+                if (featured) {
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color(0xFF49215D),
+                            Color(0xFF291544)
+                        )
+                    )
+                } else {
+                    Brush.horizontalGradient(
+                        listOf(
+                            Fk.surface,
+                            Fk.surfaceVariant.copy(alpha = 0.65f)
+                        )
+                    )
+                }
+            )
             .border(
-                width = 1.dp,
-                color = borderColor,
-                shape = shape
+                1.dp,
+                color.copy(
+                    alpha = if (featured) 0.75f else 0.3f
+                ),
+                shape
             )
-            .clickable(
-                interactionSource = interactionSource,
-                indication = null,
-                onClick = onClick
-            )
-            .padding(16.dp),
+            .clickable(onClick = onClick)
+            .padding(15.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
                 .size(48.dp)
-                .clip(
-                    RoundedCornerShape(15.dp)
-                )
+                .clip(RoundedCornerShape(14.dp))
                 .background(
-                    accent.copy(alpha = 0.15f)
+                    color.copy(alpha = 0.15f)
                 ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = icon,
+                icon,
                 contentDescription = null,
-                tint = accent,
+                tint = color,
                 modifier = Modifier.size(27.dp)
             )
         }
 
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(13.dp))
 
         Column(
             modifier = Modifier.weight(1f)
         ) {
             Text(
                 text = title,
-                color = Fk.text,
-                fontWeight = FontWeight.Bold,
+                color = Color.White,
                 fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -571,7 +531,7 @@ private fun HomeMenuCard(
             Spacer(Modifier.height(4.dp))
 
             Text(
-                text = subtitle,
+                text = description,
                 color = Fk.textSecondary,
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
@@ -580,39 +540,204 @@ private fun HomeMenuCard(
             )
         }
 
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
 
         Icon(
-            imageVector = Icons.Default.ArrowForward,
+            Icons.Default.ChevronRight,
             contentDescription = null,
-            tint = accent.copy(alpha = 0.85f),
-            modifier = Modifier.size(20.dp)
+            tint = color,
+            modifier = Modifier.size(23.dp)
         )
     }
 }
 
 @Composable
-private fun HomeFooter() {
-    val shape = RoundedCornerShape(50)
+fun FunkForgeOptionsScreen(
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val preferences = remember {
+        context.getSharedPreferences(
+            "funkforge_options",
+            0
+        )
+    }
 
-    Box(
+    var showFps by remember {
+        mutableStateOf(
+            preferences.getBoolean("show_fps", false)
+        )
+    }
+
+    var reducedMotion by remember {
+        mutableStateOf(
+            preferences.getBoolean("reduced_motion", false)
+        )
+    }
+
+    Column(
         modifier = Modifier
-            .clip(shape)
-            .background(
-                Color.White.copy(alpha = 0.05f)
-            )
-            .padding(
-                horizontal = 18.dp,
-                vertical = 10.dp
-            )
+            .fillMaxSize()
+            .background(Fk.bg)
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp)
     ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Text(
+                "OPTIONS",
+                color = Fk.cyan,
+                fontSize = 27.sp,
+                fontWeight = FontWeight.Black
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+
         Text(
-            text = "MADE FOR MOBILE  •  KEEP FUNKIN'",
-            color = Fk.textMuted,
-            fontSize = 10.sp,
+            "DISPLAY",
+            color = Fk.yellow,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp,
-            textAlign = TextAlign.Center
+            fontSize = 13.sp
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        OptionSwitch(
+            icon = Icons.Default.Speed,
+            title = "Show FPS",
+            description = "Enable the FPS counter",
+            checked = showFps,
+            onChange = {
+                showFps = it
+                preferences.edit()
+                    .putBoolean("show_fps", it)
+                    .apply()
+            }
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        OptionSwitch(
+            icon = Icons.Default.Animation,
+            title = "Reduce Motion",
+            description = "Reduce animated effects in the menu",
+            checked = reducedMotion,
+            onChange = {
+                reducedMotion = it
+                preferences.edit()
+                    .putBoolean("reduced_motion", it)
+                    .apply()
+            }
+        )
+
+        Spacer(Modifier.height(26.dp))
+
+        Text(
+            "ABOUT",
+            color = Fk.yellow,
+            fontWeight = FontWeight.Bold,
+            fontSize = 13.sp
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        Surface(
+            color = Fk.surface,
+            shape = RoundedCornerShape(18.dp),
+            border = BorderStroke(
+                1.dp,
+                Fk.border.copy(alpha = 0.5f)
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement =
+                    Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "FunkForge",
+                    color = Fk.cyan,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp
+                )
+
+                Text(
+                    "Version 0.1.0",
+                    color = Color.White
+                )
+
+                Text(
+                    "A mobile chart editor for Friday Night Funkin' modding.",
+                    color = Fk.textSecondary,
+                    fontSize = 13.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OptionSwitch(
+    icon: ImageVector,
+    title: String,
+    description: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Fk.surface)
+            .clickable {
+                onChange(!checked)
+            }
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = Fk.cyan,
+            modifier = Modifier.size(25.dp)
+        )
+
+        Spacer(Modifier.width(12.dp))
+
+        Column(
+            modifier = Modifier.weight(1f)
+        ) {
+            Text(
+                title,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+
+            Text(
+                description,
+                color = Fk.textSecondary,
+                fontSize = 12.sp
+            )
+        }
+
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange
         )
     }
 }
