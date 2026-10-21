@@ -4,36 +4,39 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import com.funkforge.model.ModExporter
+import com.funkforge.backend.Language
+import com.funkforge.external.StorageUtil
 import com.funkforge.model.Project
 import com.funkforge.model.ProjectStore
-import com.funkforge.model.PsychFormat
 import com.funkforge.play.PlayTest
 import com.funkforge.ui.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.IOException
 
 enum class Screen {
     Home,
     Editor,
     Play,
     ModTest,
-    Secret
+    Secret,
+    Options
 }
 
 object Session {
@@ -44,10 +47,21 @@ private object ProjectSaveLock {
     val lock = Any()
 }
 
+private fun saveProjectSnapshot(
+    context: Context,
+    project: Project
+) {
+    synchronized(ProjectSaveLock.lock) {
+        ProjectStore.save(context, project)
+    }
+}
+
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        Language.initialize(applicationContext)
 
         setContent {
             MaterialTheme(
@@ -73,118 +87,6 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         Session.save = null
         super.onDestroy()
-    }
-}
-
-private fun displayName(
-    context: Context,
-    uri: Uri
-): String {
-    return runCatching {
-        context.contentResolver.query(
-            uri,
-            arrayOf(OpenableColumns.DISPLAY_NAME),
-            null,
-            null,
-            null
-        )?.use { cursor ->
-            val index = cursor.getColumnIndex(
-                OpenableColumns.DISPLAY_NAME
-            )
-
-            if (cursor.moveToFirst() && index >= 0) {
-                cursor.getString(index)
-            } else {
-                null
-            }
-        } ?: uri.lastPathSegment ?: "unknown"
-    }.getOrDefault(
-        uri.lastPathSegment ?: "unknown"
-    )
-}
-
-private fun safeFileName(value: String): String {
-    return value
-        .trim()
-        .replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        .take(100)
-        .ifBlank { "untitled" }
-}
-
-private fun saveProjectSnapshot(
-    context: Context,
-    project: Project
-) {
-    synchronized(ProjectSaveLock.lock) {
-        ProjectStore.save(context, project)
-    }
-}
-
-private fun copyAudio(
-    context: Context,
-    uri: Uri,
-    target: String
-): File {
-    val name = displayName(context, uri)
-
-    val extension = name
-        .substringAfterLast('.', "")
-        .lowercase()
-
-    val supported = setOf(
-        "ogg",
-        "mp3",
-        "wav",
-        "m4a",
-        "flac"
-    )
-
-    if (extension !in supported) {
-        throw IOException(
-            "Unsupported audio format: $extension"
-        )
-    }
-
-    val directory = File(
-        context.filesDir,
-        "audio"
-    )
-
-    if (!directory.exists() && !directory.mkdirs()) {
-        throw IOException(
-            "Unable to create audio directory"
-        )
-    }
-
-    val output = File.createTempFile(
-        "${target}_",
-        ".$extension",
-        directory
-    )
-
-    try {
-        context.contentResolver
-            .openInputStream(uri)
-            ?.use { input ->
-                output.outputStream()
-                    .buffered()
-                    .use { stream ->
-                        input.copyTo(stream)
-                    }
-            } ?: throw IOException(
-                "Unable to read audio"
-            )
-
-        if (output.length() <= 0L) {
-            throw IOException(
-                "Selected audio is empty"
-            )
-        }
-
-        return output
-    } catch (e: Exception) {
-        output.delete()
-        throw e
     }
 }
 
@@ -217,16 +119,16 @@ fun FunkForgeApp() {
         mutableStateOf(false)
     }
 
+    var busy by remember {
+        mutableStateOf(false)
+    }
+
     var audioTarget by remember {
         mutableStateOf("inst")
     }
 
     var selectedModFolder by remember {
         mutableStateOf<Uri?>(null)
-    }
-
-    var busy by remember {
-        mutableStateOf(false)
     }
 
     var status by remember {
@@ -260,9 +162,9 @@ fun FunkForgeApp() {
     }
 
     fun openScreen(destination: Screen) {
-        if (busy) return
-
-        screen = destination
+        if (!busy) {
+            screen = destination
+        }
     }
 
     fun navigateBack() {
@@ -285,7 +187,8 @@ fun FunkForgeApp() {
                 screen = Screen.Home
             }
 
-            Screen.Secret -> {
+            Screen.Secret,
+            Screen.Options -> {
                 screen = Screen.Home
             }
         }
@@ -311,7 +214,7 @@ fun FunkForgeApp() {
     LaunchedEffect(project, hasProject) {
         if (!hasProject) return@LaunchedEffect
 
-        delay(1200L)
+        delay(1000L)
 
         val snapshot = project
 
@@ -333,32 +236,20 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    val importedChart = withContext(
-                        Dispatchers.IO
-                    ) {
-                        val json = context.contentResolver
-                            .openInputStream(uri)
-                            ?.bufferedReader()
-                            ?.use {
-                                it.readText()
-                            } ?: throw IOException(
-                                "Unable to read chart"
-                            )
-
-                        PsychFormat.import(json)
-                    }
+                    val chart = StorageUtil.importChart(
+                        context,
+                        uri
+                    )
 
                     project = project.copy(
-                        chart = importedChart
+                        chart = chart
                     )
 
                     hasProject = true
                     showNew = false
                     screen = Screen.Editor
 
-                    toast(
-                        "Chart imported successfully"
-                    )
+                    toast("Chart imported successfully")
                 } catch (e: Exception) {
                     toast(
                         "Chart import failed: ${e.message}"
@@ -382,24 +273,13 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    withContext(Dispatchers.IO) {
-                        val json = PsychFormat.export(
-                            snapshot.chart
-                        )
-
-                        context.contentResolver
-                            .openOutputStream(uri, "wt")
-                            ?.bufferedWriter()
-                            ?.use {
-                                it.write(json)
-                            } ?: throw IOException(
-                                "Unable to write chart"
-                            )
-                    }
-
-                    toast(
-                        "Chart exported successfully"
+                    StorageUtil.exportChart(
+                        context,
+                        uri,
+                        snapshot.chart
                     )
+
+                    toast("Chart exported successfully")
                 } catch (e: Exception) {
                     toast(
                         "Chart export failed: ${e.message}"
@@ -423,18 +303,11 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver
-                            .openOutputStream(uri, "w")
-                            ?.use { output ->
-                                ModExporter.write(
-                                    snapshot,
-                                    output
-                                )
-                            } ?: throw IOException(
-                                "Unable to create mod ZIP"
-                            )
-                    }
+                    StorageUtil.exportMod(
+                        context,
+                        uri,
+                        snapshot
+                    )
 
                     val unsupportedAudio = listOfNotNull(
                         snapshot.instPath,
@@ -451,9 +324,7 @@ fun FunkForgeApp() {
                             "Mod exported. Convert audio to OGG for Psych Engine."
                         )
                     } else {
-                        toast(
-                            "Mod exported successfully"
-                        )
+                        toast("Mod exported successfully")
                     }
                 } catch (e: Exception) {
                     toast(
@@ -476,15 +347,11 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    val file = withContext(
-                        Dispatchers.IO
-                    ) {
-                        copyAudio(
-                            context,
-                            uri,
-                            target
-                        )
-                    }
+                    val file = StorageUtil.importAudio(
+                        context,
+                        uri,
+                        target
+                    )
 
                     project = if (target == "inst") {
                         project.copy(
@@ -547,17 +414,18 @@ fun FunkForgeApp() {
 
     if (showNew) {
         SettingsDialog(
-            Project(),
-            true,
-            {
+            project = StorageUtil.createProject(),
+            isNew = true,
+            onDismiss = {
                 showNew = false
+            },
+            onSave = { newProject ->
+                project = newProject
+                hasProject = true
+                showNew = false
+                screen = Screen.Editor
             }
-        ) { newProject ->
-            project = newProject
-            hasProject = true
-            showNew = false
-            screen = Screen.Editor
-        }
+        )
     }
 
     when (screen) {
@@ -597,6 +465,16 @@ fun FunkForgeApp() {
                     } else {
                         toast(message)
                     }
+                },
+                onOptions = {
+                    openScreen(Screen.Options)
+                },
+                onEditor = {
+                    if (hasProject) {
+                        openScreen(Screen.Editor)
+                    } else {
+                        showNew = true
+                    }
                 }
             )
         }
@@ -624,14 +502,14 @@ fun FunkForgeApp() {
                 onExportJson = {
                     if (!busy) {
                         jsonExporter.launch(
-                            "${safeFileName(project.chart.song)}.json"
+                            "${StorageUtil.safeName(project.chart.song)}.json"
                         )
                     }
                 },
                 onExportMod = {
                     if (!busy) {
                         modExporter.launch(
-                            "${safeFileName(project.modName)}.zip"
+                            "${StorageUtil.safeName(project.modName)}.zip"
                         )
                     }
                 },
@@ -688,6 +566,25 @@ fun FunkForgeApp() {
 
         Screen.Secret -> {
             SecretScreen()
+        }
+
+        Screen.Options -> {
+            FunkForgeOptionsScreen(
+                onBack = {
+                    navigateBack()
+                }
+            )
+        }
+    }
+
+    if (busy) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(
+                color = Fk.cyan
+            )
         }
     }
 }
