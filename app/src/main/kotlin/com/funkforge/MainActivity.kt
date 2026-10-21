@@ -1,6 +1,7 @@
 package com.funkforge
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -21,7 +22,6 @@ import com.funkforge.model.PsychFormat
 import com.funkforge.play.PlayTest
 import com.funkforge.ui.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,6 +38,10 @@ enum class Screen {
 
 object Session {
     var save: (() -> Unit)? = null
+}
+
+private object ProjectSaveLock {
+    val lock = Any()
 }
 
 class MainActivity : ComponentActivity() {
@@ -76,7 +80,7 @@ private fun displayName(
     context: Context,
     uri: Uri
 ): String {
-    return try {
+    return runCatching {
         context.contentResolver.query(
             uri,
             arrayOf(OpenableColumns.DISPLAY_NAME),
@@ -94,9 +98,9 @@ private fun displayName(
                 null
             }
         } ?: uri.lastPathSegment ?: "unknown"
-    } catch (_: Exception) {
+    }.getOrDefault(
         uri.lastPathSegment ?: "unknown"
-    }
+    )
 }
 
 private fun safeFileName(value: String): String {
@@ -105,6 +109,15 @@ private fun safeFileName(value: String): String {
         .replace(Regex("[^a-zA-Z0-9._-]"), "_")
         .take(100)
         .ifBlank { "untitled" }
+}
+
+private fun saveProjectSnapshot(
+    context: Context,
+    project: Project
+) {
+    synchronized(ProjectSaveLock.lock) {
+        ProjectStore.save(context, project)
+    }
 }
 
 private fun copyAudio(
@@ -118,7 +131,7 @@ private fun copyAudio(
         .substringAfterLast('.', "")
         .lowercase()
 
-    val allowed = setOf(
+    val supported = setOf(
         "ogg",
         "mp3",
         "wav",
@@ -126,7 +139,7 @@ private fun copyAudio(
         "flac"
     )
 
-    if (extension !in allowed) {
+    if (extension !in supported) {
         throw IOException(
             "Unsupported audio format: $extension"
         )
@@ -135,12 +148,12 @@ private fun copyAudio(
     val directory = File(
         context.filesDir,
         "audio"
-    ).apply {
-        if (!exists() && !mkdirs()) {
-            throw IOException(
-                "Unable to create audio directory"
-            )
-        }
+    )
+
+    if (!directory.exists() && !directory.mkdirs()) {
+        throw IOException(
+            "Unable to create audio directory"
+        )
     }
 
     val output = File.createTempFile(
@@ -150,17 +163,22 @@ private fun copyAudio(
     )
 
     try {
-        context.contentResolver.openInputStream(uri)
+        context.contentResolver
+            .openInputStream(uri)
             ?.use { input ->
-                output.outputStream().buffered().use { stream ->
-                    input.copyTo(stream)
-                }
+                output.outputStream()
+                    .buffered()
+                    .use { stream ->
+                        input.copyTo(stream)
+                    }
             } ?: throw IOException(
-                "Unable to read selected audio"
+                "Unable to read audio"
             )
 
-        if (output.length() == 0L) {
-            throw IOException("Audio file is empty")
+        if (output.length() <= 0L) {
+            throw IOException(
+                "Selected audio is empty"
+            )
         }
 
         return output
@@ -175,9 +193,11 @@ fun FunkForgeApp() {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
 
-    val savedProject = remember {
+    val savedProject = remember(context) {
         runCatching {
-            ProjectStore.load(context)
+            synchronized(ProjectSaveLock.lock) {
+                ProjectStore.load(context)
+            }
         }.getOrNull()
     }
 
@@ -209,11 +229,16 @@ fun FunkForgeApp() {
         mutableStateOf(false)
     }
 
-    var saveJob by remember {
-        mutableStateOf<Job?>(null)
+    var status by remember {
+        mutableStateOf("")
     }
 
+    val latestProject by rememberUpdatedState(project)
+    val latestHasProject by rememberUpdatedState(hasProject)
+
     fun toast(message: String) {
+        status = message
+
         Toast.makeText(
             context,
             message,
@@ -221,61 +246,81 @@ fun FunkForgeApp() {
         ).show()
     }
 
-    fun saveProject() {
+    fun saveNow() {
         if (!hasProject) return
 
         val snapshot = project
 
-        saveJob?.cancel()
-
-        saveJob = scope.launch(Dispatchers.IO) {
-            runCatching {
-                ProjectStore.save(context, snapshot)
-            }
+        runCatching {
+            saveProjectSnapshot(
+                context,
+                snapshot
+            )
         }
     }
 
     fun openScreen(destination: Screen) {
+        if (busy) return
+
         screen = destination
     }
 
     fun navigateBack() {
+        if (busy) return
+
         when (screen) {
             Screen.Home -> Unit
+
             Screen.Editor -> {
-                saveProject()
+                saveNow()
                 screen = Screen.Home
             }
-            Screen.Play -> screen = Screen.Editor
-            Screen.ModTest -> screen = Screen.Home
-            Screen.Secret -> screen = Screen.Home
-        }
-    }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            saveJob?.cancel()
-        }
-    }
-
-    SideEffect {
-        Session.save = {
-            if (hasProject) {
-                ProjectStore.save(context, project)
+            Screen.Play -> {
+                screen = Screen.Editor
             }
+
+            Screen.ModTest -> {
+                selectedModFolder = null
+                screen = Screen.Home
+            }
+
+            Screen.Secret -> {
+                screen = Screen.Home
+            }
+        }
+    }
+
+    DisposableEffect(context) {
+        Session.save = {
+            if (latestHasProject) {
+                runCatching {
+                    saveProjectSnapshot(
+                        context,
+                        latestProject
+                    )
+                }
+            }
+        }
+
+        onDispose {
+            Session.save = null
         }
     }
 
     LaunchedEffect(project, hasProject) {
-        if (hasProject) {
-            delay(1200L)
+        if (!hasProject) return@LaunchedEffect
 
-            val snapshot = project
+        delay(1200L)
 
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    ProjectStore.save(context, snapshot)
-                }
+        val snapshot = project
+
+        withContext(Dispatchers.IO) {
+            runCatching {
+                saveProjectSnapshot(
+                    context,
+                    snapshot
+                )
             }
         }
     }
@@ -288,26 +333,35 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    val chart = withContext(Dispatchers.IO) {
+                    val importedChart = withContext(
+                        Dispatchers.IO
+                    ) {
                         val json = context.contentResolver
                             .openInputStream(uri)
                             ?.bufferedReader()
-                            ?.use { it.readText() }
-                            ?: throw IOException(
-                                "Unable to read JSON file"
+                            ?.use {
+                                it.readText()
+                            } ?: throw IOException(
+                                "Unable to read chart"
                             )
 
                         PsychFormat.import(json)
                     }
 
-                    project = project.copy(chart = chart)
+                    project = project.copy(
+                        chart = importedChart
+                    )
+
                     hasProject = true
+                    showNew = false
                     screen = Screen.Editor
 
-                    toast("Chart imported successfully")
+                    toast(
+                        "Chart imported successfully"
+                    )
                 } catch (e: Exception) {
                     toast(
-                        "Import failed: ${e.message}"
+                        "Chart import failed: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -336,16 +390,19 @@ fun FunkForgeApp() {
                         context.contentResolver
                             .openOutputStream(uri, "wt")
                             ?.bufferedWriter()
-                            ?.use { it.write(json) }
-                            ?: throw IOException(
-                                "Unable to write JSON"
+                            ?.use {
+                                it.write(json)
+                            } ?: throw IOException(
+                                "Unable to write chart"
                             )
                     }
 
-                    toast("Chart exported successfully")
+                    toast(
+                        "Chart exported successfully"
+                    )
                 } catch (e: Exception) {
                     toast(
-                        "Export failed: ${e.message}"
+                        "Chart export failed: ${e.message}"
                     )
                 } finally {
                     busy = false
@@ -375,7 +432,7 @@ fun FunkForgeApp() {
                                     output
                                 )
                             } ?: throw IOException(
-                                "Unable to create ZIP"
+                                "Unable to create mod ZIP"
                             )
                     }
 
@@ -389,13 +446,15 @@ fun FunkForgeApp() {
                         )
                     }
 
-                    toast(
-                        if (unsupportedAudio) {
+                    if (unsupportedAudio) {
+                        toast(
                             "Mod exported. Convert audio to OGG for Psych Engine."
-                        } else {
+                        )
+                    } else {
+                        toast(
                             "Mod exported successfully"
-                        }
-                    )
+                        )
+                    }
                 } catch (e: Exception) {
                     toast(
                         "Mod export failed: ${e.message}"
@@ -417,18 +476,14 @@ fun FunkForgeApp() {
                 busy = true
 
                 try {
-                    val file = withContext(Dispatchers.IO) {
+                    val file = withContext(
+                        Dispatchers.IO
+                    ) {
                         copyAudio(
                             context,
                             uri,
                             target
                         )
-                    }
-
-                    val oldPath = if (target == "inst") {
-                        project.instPath
-                    } else {
-                        project.voicesPath
                     }
 
                     project = if (target == "inst") {
@@ -441,32 +496,11 @@ fun FunkForgeApp() {
                         )
                     }
 
-                    if (
-                        oldPath != null &&
-                        oldPath != file.absolutePath
-                    ) {
-                        val oldFile = File(oldPath)
-                        val audioDirectory = File(
-                            context.filesDir,
-                            "audio"
-                        ).canonicalFile
-
-                        val parent = runCatching {
-                            oldFile.canonicalFile.parentFile
-                        }.getOrNull()
-
-                        if (parent == audioDirectory) {
-                            withContext(Dispatchers.IO) {
-                                oldFile.delete()
-                            }
-                        }
-                    }
-
                     toast(
                         if (target == "inst") {
-                            "Instrumental loaded"
+                            "Instrumental loaded successfully"
                         } else {
-                            "Vocals loaded"
+                            "Vocals loaded successfully"
                         }
                     )
                 } catch (e: Exception) {
@@ -483,13 +517,13 @@ fun FunkForgeApp() {
     val modFolderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
+        if (uri != null && !busy) {
+            runCatching {
+                context.contentResolver
+                    .takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
             }
 
             selectedModFolder = uri
@@ -498,7 +532,11 @@ fun FunkForgeApp() {
     }
 
     BackHandler(
-        enabled = screen != Screen.Home || showNew
+        enabled = showNew || (
+            screen != Screen.Home &&
+            screen != Screen.Play &&
+            screen != Screen.ModTest
+        )
     ) {
         if (showNew) {
             showNew = false
@@ -523,77 +561,113 @@ fun FunkForgeApp() {
     }
 
     when (screen) {
-        Screen.Home -> HomeScreen(
-            hasProject = hasProject,
-            onContinue = {
-                openScreen(Screen.Editor)
-            },
-            onNew = {
-                showNew = true
-            },
-            onImport = {
-                importer.launch(
-                    arrayOf("application/json", "text/plain")
-                )
-            },
-            onSecret = {
-                openScreen(Screen.Secret)
-            },
-            onSoon = { message ->
-                if (message == "Open Mod Folder") {
-                    modFolderPicker.launch(null)
-                } else {
-                    toast(message)
+        Screen.Home -> {
+            HomeScreen(
+                hasProject = hasProject,
+                onContinue = {
+                    if (hasProject) {
+                        openScreen(Screen.Editor)
+                    } else {
+                        showNew = true
+                    }
+                },
+                onNew = {
+                    if (!busy) {
+                        showNew = true
+                    }
+                },
+                onImport = {
+                    if (!busy) {
+                        importer.launch(
+                            arrayOf(
+                                "application/json",
+                                "text/plain"
+                            )
+                        )
+                    }
+                },
+                onSecret = {
+                    openScreen(Screen.Secret)
+                },
+                onSoon = { message ->
+                    if (message == "Open Mod Folder") {
+                        if (!busy) {
+                            modFolderPicker.launch(null)
+                        }
+                    } else {
+                        toast(message)
+                    }
                 }
-            }
-        )
+            )
+        }
 
-        Screen.Editor -> EditorScreen(
-            project = project,
-            onProject = {
-                project = it
-            },
-            onBack = {
-                navigateBack()
-            },
-            onImport = {
-                importer.launch(
-                    arrayOf("application/json", "text/plain")
-                )
-            },
-            onExportJson = {
-                jsonExporter.launch(
-                    "${safeFileName(project.chart.song)}.json"
-                )
-            },
-            onExportMod = {
-                modExporter.launch(
-                    "${safeFileName(project.modName)}.zip"
-                )
-            },
-            onPickInst = {
-                audioTarget = "inst"
-                audioPicker.launch(
-                    arrayOf("audio/*")
-                )
-            },
-            onPickVoices = {
-                audioTarget = "voices"
-                audioPicker.launch(
-                    arrayOf("audio/*")
-                )
-            },
-            onPlaytest = {
-                openScreen(Screen.Play)
-            }
-        )
+        Screen.Editor -> {
+            EditorScreen(
+                project = project,
+                onProject = { updated ->
+                    project = updated
+                    hasProject = true
+                },
+                onBack = {
+                    navigateBack()
+                },
+                onImport = {
+                    if (!busy) {
+                        importer.launch(
+                            arrayOf(
+                                "application/json",
+                                "text/plain"
+                            )
+                        )
+                    }
+                },
+                onExportJson = {
+                    if (!busy) {
+                        jsonExporter.launch(
+                            "${safeFileName(project.chart.song)}.json"
+                        )
+                    }
+                },
+                onExportMod = {
+                    if (!busy) {
+                        modExporter.launch(
+                            "${safeFileName(project.modName)}.zip"
+                        )
+                    }
+                },
+                onPickInst = {
+                    if (!busy) {
+                        audioTarget = "inst"
 
-        Screen.Play -> PlayScreen(
-            project = project,
-            onBack = {
-                navigateBack()
-            }
-        )
+                        audioPicker.launch(
+                            arrayOf("audio/*")
+                        )
+                    }
+                },
+                onPickVoices = {
+                    if (!busy) {
+                        audioTarget = "voices"
+
+                        audioPicker.launch(
+                            arrayOf("audio/*")
+                        )
+                    }
+                },
+                onPlaytest = {
+                    saveNow()
+                    openScreen(Screen.Play)
+                }
+            )
+        }
+
+        Screen.Play -> {
+            PlayScreen(
+                project = project,
+                onExit = {
+                    navigateBack()
+                }
+            )
+        }
 
         Screen.ModTest -> {
             val folder = selectedModFolder
@@ -605,9 +679,15 @@ fun FunkForgeApp() {
                         navigateBack()
                     }
                 )
+            } else {
+                LaunchedEffect(Unit) {
+                    screen = Screen.Home
+                }
             }
         }
 
-        Screen.Secret -> SecretScreen()
+        Screen.Secret -> {
+            SecretScreen()
+        }
     }
 }
