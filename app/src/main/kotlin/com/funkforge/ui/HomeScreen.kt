@@ -1,7 +1,11 @@
 package com.funkforge.ui
 
+import android.content.Context
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,17 +28,24 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.funkforge.backend.AppLanguage
+import com.funkforge.backend.Language
+import com.funkforge.backend.TextKey
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.random.Random
 
-private data class MenuParticle(
+private data class HomeParticle(
     val x: Float,
     val phase: Float,
     val speed: Float,
-    val size: Float,
-    val color: Int
+    val radius: Float,
+    val colorIndex: Int
 )
+
+private fun homeText(key: TextKey): String {
+    return Language.get(key)
+}
 
 @Composable
 fun HomeScreen(
@@ -44,13 +55,16 @@ fun HomeScreen(
     onImport: () -> Unit,
     onSecret: () -> Unit,
     onSoon: (String) -> Unit,
-    onOptions: () -> Unit = {}
+    onOptions: () -> Unit = {},
+    onEditor: () -> Unit = {
+        if (hasProject) onContinue() else onNew()
+    }
 ) {
     val context = LocalContext.current
-    val preferences = remember {
+    val preferences = remember(context) {
         context.getSharedPreferences(
             "funkforge_options",
-            0
+            Context.MODE_PRIVATE
         )
     }
 
@@ -60,49 +74,56 @@ fun HomeScreen(
         )
     }
 
+    val language = Language.current
+
+    val sprites = rememberSprites()
+
     val particles = remember {
-        List(24) {
-            MenuParticle(
+        List(30) {
+            HomeParticle(
                 x = Random.nextFloat(),
                 phase = Random.nextFloat(),
-                speed = 0.4f + Random.nextFloat(),
-                size = 2f + Random.nextFloat() * 4f,
-                color = Random.nextInt(3)
+                speed = 0.3f + Random.nextFloat() * 1.1f,
+                radius = 1.5f + Random.nextFloat() * 3.5f,
+                colorIndex = Random.nextInt(3)
             )
         }
     }
 
     val transition = rememberInfiniteTransition(
-        label = "home"
+        label = "homeTransition"
     )
 
-    val animation by transition.animateFloat(
+    val time by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(
-                16000,
+                durationMillis = 18000,
                 easing = LinearEasing
             )
         ),
-        label = "background"
+        label = "homeTime"
     )
 
     val pulse by transition.animateFloat(
-        initialValue = 0.96f,
-        targetValue = 1.04f,
+        initialValue = 0.94f,
+        targetValue = 1.07f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1100),
+            animation = tween(
+                durationMillis = 850,
+                easing = FastOutSlowInEasing
+            ),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "logoPulse"
+        label = "homePulse"
     )
 
     var secretTaps by remember {
         mutableIntStateOf(0)
     }
 
-    val colors = listOf(
+    val particleColors = listOf(
         Fk.pink,
         Fk.cyan,
         Fk.purple
@@ -116,7 +137,8 @@ fun HomeScreen(
                     listOf(
                         Color(0xFF10071E),
                         Fk.bg,
-                        Color(0xFF251043)
+                        Fk.bg2,
+                        Color(0xFF110820)
                     )
                 )
             )
@@ -124,41 +146,39 @@ fun HomeScreen(
         Canvas(
             modifier = Modifier.fillMaxSize()
         ) {
+            val firstCenter = Offset(
+                size.width * 0.1f,
+                size.height * 0.2f
+            )
+
+            val secondCenter = Offset(
+                size.width * 0.9f,
+                size.height * 0.75f
+            )
+
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(
-                        Fk.pink.copy(alpha = 0.16f),
+                    colors = listOf(
+                        Fk.pink.copy(alpha = 0.15f),
                         Color.Transparent
                     ),
-                    center = Offset(
-                        size.width * 0.1f,
-                        size.height * 0.25f
-                    ),
+                    center = firstCenter,
                     radius = size.width
                 ),
-                center = Offset(
-                    size.width * 0.1f,
-                    size.height * 0.25f
-                ),
+                center = firstCenter,
                 radius = size.width
             )
 
             drawCircle(
                 brush = Brush.radialGradient(
-                    listOf(
-                        Fk.cyan.copy(alpha = 0.10f),
+                    colors = listOf(
+                        Fk.cyan.copy(alpha = 0.1f),
                         Color.Transparent
                     ),
-                    center = Offset(
-                        size.width * 0.9f,
-                        size.height * 0.8f
-                    ),
+                    center = secondCenter,
                     radius = size.width
                 ),
-                center = Offset(
-                    size.width * 0.9f,
-                    size.height * 0.8f
-                ),
+                center = secondCenter,
                 radius = size.width
             )
 
@@ -167,23 +187,23 @@ fun HomeScreen(
                     particle.phase
                 } else {
                     (
-                        animation * particle.speed +
+                        time * particle.speed +
                         particle.phase
                     ) % 1f
                 }
 
-                val wave = sin(
-                    progress * PI * 2.0
-                ).toFloat() * 15f
+                val drift = sin(
+                    progress.toDouble() * PI * 2.0
+                ).toFloat() * 14f
 
                 drawCircle(
-                    color = colors[particle.color].copy(
-                        alpha = 0.25f
-                    ),
-                    radius = particle.size,
+                    color = particleColors[
+                        particle.colorIndex
+                    ].copy(alpha = 0.22f),
+                    radius = particle.radius,
                     center = Offset(
-                        particle.x * size.width + wave,
-                        size.height * (1f - progress)
+                        particle.x * size.width + drift,
+                        (1f - progress) * size.height
                     )
                 )
             }
@@ -204,54 +224,65 @@ fun HomeScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    shape = RoundedCornerShape(50),
                     color = Fk.cyan.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(50),
                     border = BorderStroke(
                         1.dp,
                         Fk.cyan.copy(alpha = 0.35f)
                     )
                 ) {
                     Text(
-                        text = "FUNKFORGE  •  V0.1",
+                        text = "FUNKFORGE • V0.1",
                         modifier = Modifier.padding(
                             horizontal = 13.dp,
                             vertical = 8.dp
                         ),
                         color = Fk.cyan,
-                        fontWeight = FontWeight.Bold,
                         fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
                     )
                 }
 
                 Spacer(Modifier.weight(1f))
 
-                IconButton(
+                Surface(
                     onClick = onOptions,
-                    modifier = Modifier
-                        .background(
-                            Fk.surfaceVariant,
-                            RoundedCornerShape(14.dp)
-                        )
-                ) {
-                    Icon(
-                        Icons.Default.Settings,
-                        contentDescription = "Options",
-                        tint = Fk.cyan
+                    color = Fk.surfaceVariant,
+                    shape = RoundedCornerShape(13.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        Fk.border.copy(alpha = 0.5f)
                     )
+                ) {
+                    Box(
+                        modifier = Modifier.size(45.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = homeText(
+                                TextKey.OPTIONS
+                            ),
+                            tint = Fk.cyan,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
             }
 
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(24.dp))
 
             Row(
                 horizontalArrangement =
-                    Arrangement.spacedBy(6.dp),
+                    Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val sprites = rememberSprites()
-
                 repeat(4) { index ->
+                    val active = (
+                        (time * 32f).toInt() % 4
+                    ) == index
+
                     Image(
                         bitmap = sprites.notes[index],
                         contentDescription = null,
@@ -259,23 +290,24 @@ fun HomeScreen(
                             .size(53.dp)
                             .scale(
                                 if (reducedMotion) 1f
-                                else if (
-                                    (animation * 16).toInt() % 4 == index
-                                ) pulse
-                                else 0.95f
+                                else if (active) pulse
+                                else 0.92f
                             )
                     )
                 }
             }
 
-            Spacer(Modifier.height(15.dp))
+            Spacer(Modifier.height(12.dp))
 
             Text(
                 text = "FunkForge",
-                color = Color.White,
-                fontSize = 43.sp,
-                fontWeight = FontWeight.Black,
-                letterSpacing = (-2).sp,
+                style = MaterialTheme.typography.displayMedium.copy(
+                    brush = Brush.horizontalGradient(
+                        listOf(Fk.cyan, Fk.pink)
+                    ),
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = (-1.5).sp
+                ),
                 modifier = Modifier.clickable {
                     secretTaps++
 
@@ -286,55 +318,59 @@ fun HomeScreen(
                 }
             )
 
+            Spacer(Modifier.height(6.dp))
+
             Text(
-                text = "CREATE • EDIT • REMIX",
-                color = Fk.cyan,
+                text = homeText(TextKey.APP_SLOGAN),
+                color = Color.White,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 2.sp,
+                textAlign = TextAlign.Center
             )
 
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(8.dp))
 
             Text(
-                text = "Your Friday Night Funkin' creation studio.",
+                text = homeText(TextKey.APP_SUBTITLE),
                 color = Fk.textSecondary,
                 fontSize = 13.sp,
+                lineHeight = 19.sp,
                 textAlign = TextAlign.Center
             )
 
             Spacer(Modifier.height(25.dp))
 
-            HomeHeading(
-                "WORKSPACE",
-                Icons.Default.Dashboard
+            HomeSection(
+                title = homeText(TextKey.WORKSPACE),
+                icon = Icons.Default.Dashboard,
+                color = Fk.yellow
             )
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
 
-            HomeTile(
+            HomeMenuCard(
                 icon = Icons.Default.Edit,
-                title = "Chart Editor",
-                description = if (hasProject) {
-                    "Open your current chart and continue editing"
-                } else {
-                    "Create your first chart and start editing"
-                },
+                title = homeText(TextKey.CHART_EDITOR),
+                description = homeText(
+                    TextKey.CHART_EDITOR_DESCRIPTION
+                ),
                 color = Fk.pink,
                 featured = true,
-                onClick = {
-                    if (hasProject) onContinue()
-                    else onNew()
-                }
+                onClick = onEditor
             )
 
             Spacer(Modifier.height(10.dp))
 
             if (hasProject) {
-                HomeTile(
-                    icon = Icons.Default.FolderOpen,
-                    title = "Continue Project",
-                    description = "Resume your saved FunkForge project",
+                HomeMenuCard(
+                    icon = Icons.Default.PlayArrow,
+                    title = homeText(
+                        TextKey.CONTINUE_PROJECT
+                    ),
+                    description = homeText(
+                        TextKey.CONTINUE_PROJECT_DESCRIPTION
+                    ),
                     color = Fk.yellow,
                     onClick = onContinue
                 )
@@ -342,37 +378,44 @@ fun HomeScreen(
                 Spacer(Modifier.height(10.dp))
             }
 
-            HomeTile(
+            HomeMenuCard(
                 icon = Icons.Default.AddCircle,
-                title = "New Project",
-                description = "Create a song and configure your mod",
+                title = homeText(TextKey.NEW_PROJECT),
+                description = homeText(
+                    TextKey.NEW_PROJECT_DESCRIPTION
+                ),
                 color = Fk.purple,
                 onClick = onNew
             )
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(20.dp))
 
-            HomeHeading(
-                "TOOLS",
-                Icons.Default.Build
+            HomeSection(
+                title = homeText(TextKey.TOOLS),
+                icon = Icons.Default.Build,
+                color = Fk.cyan
             )
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
 
-            HomeTile(
+            HomeMenuCard(
                 icon = Icons.Default.FileOpen,
-                title = "Import Chart",
-                description = "Import a Psych Engine JSON chart",
+                title = homeText(TextKey.IMPORT_CHART),
+                description = homeText(
+                    TextKey.IMPORT_CHART_DESCRIPTION
+                ),
                 color = Fk.cyan,
                 onClick = onImport
             )
 
             Spacer(Modifier.height(10.dp))
 
-            HomeTile(
-                icon = Icons.Default.Folder,
-                title = "Mod Playtest",
-                description = "Open a mod folder and test its songs",
+            HomeMenuCard(
+                icon = Icons.Default.FolderOpen,
+                title = homeText(TextKey.MOD_PLAYTEST),
+                description = homeText(
+                    TextKey.MOD_PLAYTEST_DESCRIPTION
+                ),
                 color = Fk.green,
                 onClick = {
                     onSoon("Open Mod Folder")
@@ -381,45 +424,64 @@ fun HomeScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            HomeTile(
+            HomeMenuCard(
                 icon = Icons.Default.SwapHoriz,
-                title = "Funky Maker Converter",
-                description = "Conversion tools • Coming soon",
+                title = homeText(
+                    TextKey.FUNKY_MAKER_CONVERTER
+                ),
+                description = homeText(
+                    TextKey.COMING_SOON
+                ),
                 color = Fk.yellow,
                 onClick = {
                     onSoon(
-                        "Funky Maker Converter is coming soon"
+                        homeText(
+                            TextKey.COMING_SOON
+                        )
                     )
                 }
             )
 
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(20.dp))
 
-            HomeHeading(
-                "MORE",
-                Icons.Default.AutoAwesome
+            HomeSection(
+                title = homeText(TextKey.MORE),
+                icon = Icons.Default.AutoAwesome,
+                color = Fk.purple
             )
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
 
-            HomeTile(
+            HomeMenuCard(
                 icon = Icons.Default.Star,
-                title = "Secret Zone",
-                description = "Discover hidden FunkForge content",
+                title = homeText(TextKey.SECRET_ZONE),
+                description = homeText(
+                    TextKey.SECRET_ZONE_DESCRIPTION
+                ),
                 color = Fk.purple,
                 onClick = onSecret
             )
 
-            Spacer(Modifier.height(25.dp))
+            Spacer(Modifier.height(26.dp))
 
-            Text(
-                text = "MADE FOR MOBILE • KEEP FUNKIN'",
-                color = Fk.textMuted,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp,
-                textAlign = TextAlign.Center
-            )
+            Surface(
+                color = Color.White.copy(alpha = 0.05f),
+                shape = RoundedCornerShape(50)
+            ) {
+                Text(
+                    text = homeText(
+                        TextKey.MADE_FOR_MOBILE
+                    ),
+                    modifier = Modifier.padding(
+                        horizontal = 17.dp,
+                        vertical = 10.dp
+                    ),
+                    color = Fk.textMuted,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
 
             Spacer(Modifier.height(12.dp))
         }
@@ -427,35 +489,43 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeHeading(
+private fun HomeSection(
     title: String,
-    icon: ImageVector
+    icon: ImageVector,
+    color: Color
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            icon,
+            imageVector = icon,
             contentDescription = null,
-            tint = Fk.yellow,
-            modifier = Modifier.size(17.dp)
+            tint = color,
+            modifier = Modifier.size(18.dp)
         )
 
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(9.dp))
 
         Text(
-            text = title,
+            text = title.uppercase(),
             color = Fk.textSecondary,
-            fontWeight = FontWeight.Bold,
             fontSize = 12.sp,
-            letterSpacing = 1.4.sp
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 1.3.sp
+        )
+
+        Spacer(Modifier.width(12.dp))
+
+        HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            color = Fk.border.copy(alpha = 0.35f)
         )
     }
 }
 
 @Composable
-private fun HomeTile(
+private fun HomeMenuCard(
     icon: ImageVector,
     title: String,
     description: String,
@@ -465,35 +535,62 @@ private fun HomeTile(
 ) {
     val shape = RoundedCornerShape(18.dp)
 
+    val interaction = remember {
+        MutableInteractionSource()
+    }
+
+    val pressed by interaction.collectIsPressedAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "menuCardScale"
+    )
+
+    val borderColor by animateColorAsState(
+        targetValue = color.copy(
+            alpha = if (pressed) 0.95f
+            else if (featured) 0.7f
+            else 0.3f
+        ),
+        label = "menuCardBorder"
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .scale(scale)
             .clip(shape)
             .background(
-                if (featured) {
-                    Brush.horizontalGradient(
+                Brush.horizontalGradient(
+                    if (featured) {
                         listOf(
-                            Color(0xFF49215D),
-                            Color(0xFF291544)
+                            Color(0xFF482055),
+                            Color(0xFF291440)
                         )
-                    )
-                } else {
-                    Brush.horizontalGradient(
+                    } else {
                         listOf(
                             Fk.surface,
-                            Fk.surfaceVariant.copy(alpha = 0.65f)
+                            Fk.surfaceVariant.copy(
+                                alpha = 0.65f
+                            )
                         )
-                    )
-                }
+                    }
+                )
             )
             .border(
                 1.dp,
-                color.copy(
-                    alpha = if (featured) 0.75f else 0.3f
-                ),
+                borderColor,
                 shape
             )
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            )
             .padding(15.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -507,10 +604,10 @@ private fun HomeTile(
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                icon,
+                imageVector = icon,
                 contentDescription = null,
                 tint = color,
-                modifier = Modifier.size(27.dp)
+                modifier = Modifier.size(26.dp)
             )
         }
 
@@ -540,13 +637,13 @@ private fun HomeTile(
             )
         }
 
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(8.dp))
 
         Icon(
-            Icons.Default.ChevronRight,
+            imageVector = Icons.Default.ChevronRight,
             contentDescription = null,
             tint = color,
-            modifier = Modifier.size(23.dp)
+            modifier = Modifier.size(22.dp)
         )
     }
 }
@@ -556,10 +653,11 @@ fun FunkForgeOptionsScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val preferences = remember {
+
+    val preferences = remember(context) {
         context.getSharedPreferences(
             "funkforge_options",
-            0
+            Context.MODE_PRIVATE
         )
     }
 
@@ -575,12 +673,18 @@ fun FunkForgeOptionsScreen(
         )
     }
 
+    var languageDialog by remember {
+        mutableStateOf(false)
+    }
+
+    val currentLanguage = Language.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Fk.bg)
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
+            .padding(18.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically
@@ -588,77 +692,140 @@ fun FunkForgeOptionsScreen(
             IconButton(onClick = onBack) {
                 Icon(
                     Icons.Default.ArrowBack,
-                    contentDescription = "Back",
+                    contentDescription = homeText(TextKey.BACK),
                     tint = Color.White
                 )
             }
 
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(10.dp))
 
             Text(
-                "OPTIONS",
+                text = homeText(TextKey.OPTIONS).uppercase(),
                 color = Fk.cyan,
-                fontSize = 27.sp,
+                fontSize = 26.sp,
                 fontWeight = FontWeight.Black
             )
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(25.dp))
 
-        Text(
-            "DISPLAY",
-            color = Fk.yellow,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.sp
+        HomeSection(
+            title = homeText(TextKey.DISPLAY),
+            icon = Icons.Default.Tune,
+            color = Fk.yellow
         )
 
         Spacer(Modifier.height(12.dp))
 
-        OptionSwitch(
+        HomeOptionSwitch(
             icon = Icons.Default.Speed,
-            title = "Show FPS",
-            description = "Enable the FPS counter",
+            title = homeText(TextKey.SHOW_FPS),
+            description = homeText(
+                TextKey.SHOW_FPS_DESCRIPTION
+            ),
             checked = showFps,
             onChange = {
                 showFps = it
+
                 preferences.edit()
                     .putBoolean("show_fps", it)
                     .apply()
             }
         )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
 
-        OptionSwitch(
+        HomeOptionSwitch(
             icon = Icons.Default.Animation,
-            title = "Reduce Motion",
-            description = "Reduce animated effects in the menu",
+            title = homeText(TextKey.REDUCE_MOTION),
+            description = homeText(
+                TextKey.REDUCE_MOTION_DESCRIPTION
+            ),
             checked = reducedMotion,
             onChange = {
                 reducedMotion = it
+
                 preferences.edit()
                     .putBoolean("reduced_motion", it)
                     .apply()
             }
         )
 
-        Spacer(Modifier.height(26.dp))
+        Spacer(Modifier.height(24.dp))
 
-        Text(
-            "ABOUT",
-            color = Fk.yellow,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.sp
+        HomeSection(
+            title = homeText(TextKey.LANGUAGE),
+            icon = Icons.Default.Language,
+            color = Fk.cyan
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        Surface(
+            onClick = {
+                languageDialog = true
+            },
+            color = Fk.surface,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(
+                1.dp,
+                Fk.border.copy(alpha = 0.4f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(15.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Language,
+                    contentDescription = null,
+                    tint = Fk.cyan
+                )
+
+                Spacer(Modifier.width(13.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        homeText(TextKey.LANGUAGE),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text(
+                        currentLanguage.displayName,
+                        color = Fk.textSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = Fk.cyan
+                )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        HomeSection(
+            title = homeText(TextKey.ABOUT),
+            icon = Icons.Default.Info,
+            color = Fk.purple
         )
 
         Spacer(Modifier.height(12.dp))
 
         Surface(
             color = Fk.surface,
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(16.dp),
             border = BorderStroke(
                 1.dp,
-                Fk.border.copy(alpha = 0.5f)
+                Fk.border.copy(alpha = 0.4f)
             )
         ) {
             Column(
@@ -671,73 +838,136 @@ fun FunkForgeOptionsScreen(
                 Text(
                     "FunkForge",
                     color = Fk.cyan,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Black
                 )
 
                 Text(
-                    "Version 0.1.0",
+                    "${homeText(TextKey.VERSION)} 0.1.0",
                     color = Color.White
                 )
 
                 Text(
-                    "A mobile chart editor for Friday Night Funkin' modding.",
+                    homeText(TextKey.APP_SUBTITLE),
                     color = Fk.textSecondary,
                     fontSize = 13.sp
                 )
             }
         }
     }
+
+    if (languageDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                languageDialog = false
+            },
+            title = {
+                Text(homeText(TextKey.LANGUAGE))
+            },
+            text = {
+                Column {
+                    AppLanguage.entries.forEach { language ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    Language.setLanguage(
+                                        context,
+                                        language
+                                    )
+
+                                    languageDialog = false
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = currentLanguage == language,
+                                onClick = {
+                                    Language.setLanguage(
+                                        context,
+                                        language
+                                    )
+
+                                    languageDialog = false
+                                }
+                            )
+
+                            Spacer(Modifier.width(8.dp))
+
+                            Text(language.displayName)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        languageDialog = false
+                    }
+                ) {
+                    Text(homeText(TextKey.CLOSE))
+                }
+            }
+        )
+    }
 }
 
 @Composable
-private fun OptionSwitch(
+private fun HomeOptionSwitch(
     icon: ImageVector,
     title: String,
     description: String,
     checked: Boolean,
     onChange: (Boolean) -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(Fk.surface)
-            .clickable {
-                onChange(!checked)
-            }
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = Fk.cyan,
-            modifier = Modifier.size(25.dp)
+    Surface(
+        color = Fk.surface,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(
+            1.dp,
+            Fk.border.copy(alpha = 0.4f)
         )
-
-        Spacer(Modifier.width(12.dp))
-
-        Column(
-            modifier = Modifier.weight(1f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    onChange(!checked)
+                }
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                title,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = Fk.cyan,
+                modifier = Modifier.size(25.dp)
             )
 
-            Text(
-                description,
-                color = Fk.textSecondary,
-                fontSize = 12.sp
+            Spacer(Modifier.width(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    text = description,
+                    color = Fk.textSecondary,
+                    fontSize = 12.sp
+                )
+            }
+
+            Switch(
+                checked = checked,
+                onCheckedChange = onChange
             )
         }
-
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange
-        )
     }
 }
