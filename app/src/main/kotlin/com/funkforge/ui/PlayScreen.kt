@@ -6,14 +6,19 @@ import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.material3.Button
-import androidx.compose.material.material3.Icon
-import androidx.compose.material.material3.IconButton
-import androidx.compose.material.material3.OutlinedButton
-import androidx.compose.material.material3.Text
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,6 +29,7 @@ import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -31,9 +37,133 @@ import androidx.compose.ui.unit.sp
 import com.funkforge.audio.Playback
 import com.funkforge.model.Project
 import com.funkforge.model.lowerBound
-import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.roundToInt
+
+private const val COUNTDOWN_MS = 2500.0
+private const val HIT_WINDOW_MS = 160.0
+private const val SUSTAIN_TICK_MS = 100.0
+
+private enum class PlayResult {
+    Sick,
+    Good,
+    Bad,
+    Shit,
+    Miss
+}
+
+private fun judgeHit(diff: Double): PlayResult {
+    return when {
+        diff <= 45.0 -> PlayResult.Sick
+        diff <= 90.0 -> PlayResult.Good
+        diff <= 135.0 -> PlayResult.Bad
+        else -> PlayResult.Shit
+    }
+}
+
+private fun resultScore(result: PlayResult): Int {
+    return when (result) {
+        PlayResult.Sick -> 350
+        PlayResult.Good -> 200
+        PlayResult.Bad -> 100
+        PlayResult.Shit -> 50
+        PlayResult.Miss -> 0
+    }
+}
+
+private fun resultWeight(result: PlayResult): Double {
+    return when (result) {
+        PlayResult.Sick -> 1.0
+        PlayResult.Good -> 0.75
+        PlayResult.Bad -> 0.5
+        PlayResult.Shit -> 0.25
+        PlayResult.Miss -> 0.0
+    }
+}
+
+private class PlaySession(
+    val noteCount: Int
+) {
+    val hit = BooleanArray(noteCount)
+    val missed = BooleanArray(noteCount)
+    val sustainBroken = BooleanArray(noteCount)
+    val sustainProgress = DoubleArray(noteCount)
+    val sustainLastTick = DoubleArray(noteCount) { Double.NaN }
+    val counts = IntArray(5)
+    val glow = DoubleArray(8)
+    val held = BooleanArray(4)
+    val pointerCount = IntArray(4)
+
+    var score by mutableIntStateOf(0)
+    var combo by mutableIntStateOf(0)
+    var maxCombo by mutableIntStateOf(0)
+    var health by mutableFloatStateOf(1f)
+    var accuracyTotal by mutableDoubleStateOf(0.0)
+    var accuracyCount by mutableIntStateOf(0)
+    var lastRating by mutableStateOf("")
+    var lastRatingUntil by mutableDoubleStateOf(0.0)
+    var songMs by mutableDoubleStateOf(-COUNTDOWN_MS)
+    var paused by mutableStateOf(false)
+    var finished by mutableStateOf(false)
+    var failed by mutableStateOf(false)
+
+    val accuracy: Double
+        get() = if (accuracyCount == 0) {
+            100.0
+        } else {
+            accuracyTotal / accuracyCount * 100.0
+        }
+
+    val rank: String
+        get() = when {
+            accuracy >= 99.5 -> "S+"
+            accuracy >= 95.0 -> "S"
+            accuracy >= 90.0 -> "A"
+            accuracy >= 80.0 -> "B"
+            accuracy >= 70.0 -> "C"
+            else -> "D"
+        }
+
+    fun register(result: PlayResult, time: Double) {
+        val index = result.ordinal
+        counts[index]++
+        accuracyTotal += resultWeight(result)
+        accuracyCount++
+
+        if (result == PlayResult.Miss) {
+            combo = 0
+            health = (health - 0.06f).coerceAtLeast(0f)
+        } else {
+            score += resultScore(result)
+            combo++
+            maxCombo = maxOf(maxCombo, combo)
+            health = (health + 0.025f).coerceAtMost(2f)
+        }
+
+        lastRating = result.name.uppercase()
+        lastRatingUntil = time + 450.0
+    }
+
+    fun breakSustain(time: Double) {
+        combo = 0
+        health = (health - 0.025f).coerceAtLeast(0f)
+        lastRating = "MISS"
+        lastRatingUntil = time + 450.0
+    }
+
+    fun pressLane(lane: Int) {
+        if (lane !in 0..3) return
+        pointerCount[lane]++
+        held[lane] = true
+    }
+
+    fun releaseLane(lane: Int) {
+        if (lane !in 0..3) return
+        pointerCount[lane] = (pointerCount[lane] - 1).coerceAtLeast(0)
+        held[lane] = pointerCount[lane] > 0
+    }
+}
 
 @Composable
 fun PlayScreen(
@@ -44,38 +174,37 @@ fun PlayScreen(
     val activity = context as? Activity
 
     DisposableEffect(activity) {
-        val previousOrientation = activity?.requestedOrientation
-
+        val previous = activity?.requestedOrientation
         activity?.requestedOrientation =
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         onDispose {
-            if (previousOrientation != null) {
-                activity.requestedOrientation = previousOrientation
+            if (previous != null) {
+                activity.requestedOrientation = previous
             }
         }
     }
 
-    BackHandler(onBack = onExit)
-
     val chart = project.chart
-
     val notes = remember(chart) {
         chart.notes.sortedBy { it.timeMs }
     }
-
     val sprites = rememberSprites()
 
-    val playback = remember(context) {
-        Playback(context)
-    }
-
-    DisposableEffect(
-        playback,
+    val playback = remember(
+        context,
         project.instPath,
         project.voicesPath
     ) {
-        playback.load(
+        Playback(context)
+    }
+
+    var audioAvailable by remember(playback) {
+        mutableStateOf(false)
+    }
+
+    DisposableEffect(playback) {
+        audioAvailable = playback.load(
             project.instPath,
             project.voicesPath
         )
@@ -89,109 +218,178 @@ fun PlayScreen(
         mutableIntStateOf(0)
     }
 
-    val hit = remember(notes, runId) {
-        BooleanArray(notes.size)
+    val session = remember(notes, runId) {
+        PlaySession(notes.size)
     }
 
-    val missed = remember(notes, runId) {
-        BooleanArray(notes.size)
+    var countdownStart by remember(runId) {
+        mutableLongStateOf(0L)
     }
 
-    val counts = remember(runId) {
-        IntArray(5)
+    var pauseStarted by remember(runId) {
+        mutableLongStateOf(0L)
     }
 
-    val glow = remember(runId) {
-        DoubleArray(8)
+    var accumulatedPause by remember(runId) {
+        mutableLongStateOf(0L)
     }
 
-    val held = remember(runId) {
-        BooleanArray(4)
-    }
-
-    val drawPtr = remember(notes, runId) {
-        intArrayOf(0)
-    }
-
-    var songMs by remember(runId) {
-        mutableDoubleStateOf(-2500.0)
-    }
-
-    var score by remember(runId) {
-        mutableIntStateOf(0)
-    }
-
-    var combo by remember(runId) {
-        mutableIntStateOf(0)
-    }
-
-    var health by remember(runId) {
-        mutableFloatStateOf(1f)
-    }
-
-    var finished by remember(runId) {
+    var audioStarted by remember(runId) {
         mutableStateOf(false)
     }
 
-    var failed by remember(runId) {
-        mutableStateOf(false)
+    val endMs = remember(notes, playback) {
+        maxOf(
+            notes.maxOfOrNull {
+                it.timeMs + it.sustainMs
+            } ?: 0.0,
+            playback.durationMs.toDouble()
+        ) + 1200.0
     }
 
-    val endMs = remember(notes) {
-        (notes.maxOfOrNull {
-            it.timeMs + it.sustainMs
-        } ?: 0.0) + 1500.0
+    fun restart() {
+        playback.stop()
+        runId++
+    }
+
+    fun pauseGame() {
+        if (session.finished || session.paused) return
+
+        session.paused = true
+        pauseStarted = SystemClock.elapsedRealtime()
+        playback.pause()
+    }
+
+    fun resumeGame() {
+        if (session.finished || !session.paused) return
+
+        val now = SystemClock.elapsedRealtime()
+        accumulatedPause += now - pauseStarted
+        session.paused = false
+
+        if (audioStarted && audioAvailable) {
+            playback.resume()
+        }
+    }
+
+    fun exitGame() {
+        playback.pause()
+        onExit()
+    }
+
+    BackHandler {
+        if (session.finished) {
+            exitGame()
+        } else if (session.paused) {
+            resumeGame()
+        } else {
+            pauseGame()
+        }
+    }
+
+    fun press(lane: Int) {
+        if (
+            lane !in 0..3 ||
+            session.paused ||
+            session.finished ||
+            session.songMs < 0.0
+        ) return
+
+        session.pressLane(lane)
+
+        val time = session.songMs
+        var index = notes.lowerBound(time - HIT_WINDOW_MS)
+
+        while (
+            index < notes.size &&
+            notes[index].timeMs <= time + HIT_WINDOW_MS
+        ) {
+            val note = notes[index]
+
+            if (
+                note.lane == lane + 4 &&
+                !session.hit[index]
+            ) {
+                val difference = abs(note.timeMs - time)
+                val result = judgeHit(difference)
+
+                session.hit[index] = true
+                session.register(result, time)
+                session.glow[lane + 4] = time + 110.0
+
+                if (note.sustainMs > 0.0) {
+                    session.sustainProgress[index] = 0.0
+                    session.sustainLastTick[index] = note.timeMs
+                }
+
+                return
+            }
+
+            index++
+        }
     }
 
     LaunchedEffect(runId, playback) {
         playback.stop()
+        countdownStart = SystemClock.elapsedRealtime()
+        accumulatedPause = 0L
+        audioStarted = false
 
-        val countdownStart = SystemClock.elapsedRealtime()
-        var audioStarted = false
         var opponentIndex = 0
         var missIndex = 0
 
-        while (!finished) {
+        while (!session.finished) {
             withFrameNanos { }
 
+            if (session.paused) continue
+
+            val now = SystemClock.elapsedRealtime()
             val elapsed = (
-                SystemClock.elapsedRealtime() - countdownStart
+                now - countdownStart - accumulatedPause
             ).toDouble()
 
-            val time = if (!audioStarted) {
-                elapsed - 2500.0
-            } else {
-                if (playback.hasAudio) {
-                    playback.positionMs.toDouble()
-                } else {
-                    elapsed - 2500.0
+            val fallbackTime = elapsed - COUNTDOWN_MS
+
+            if (!audioStarted && fallbackTime >= 0.0) {
+                audioStarted = true
+
+                if (audioAvailable) {
+                    playback.play(0)
                 }
             }
 
-            songMs = time
-
-            if (!audioStarted && time >= 0.0) {
-                audioStarted = true
-                playback.play(0)
-                songMs = 0.0
+            val time = if (
+                audioStarted &&
+                audioAvailable &&
+                playback.isPlaying
+            ) {
+                playback.positionMs.toDouble()
+            } else {
+                fallbackTime
             }
 
-            if (audioStarted && playback.isPlaying) {
+            session.songMs = time
+
+            if (
+                audioStarted &&
+                audioAvailable &&
+                playback.isPlaying
+            ) {
                 playback.synchronize()
             }
 
             while (
                 opponentIndex < notes.size &&
-                notes[opponentIndex].timeMs <= songMs
+                notes[opponentIndex].timeMs <= time
             ) {
                 val note = notes[opponentIndex]
 
                 if (
                     note.lane in 0..3 &&
-                    !hit[opponentIndex]
+                    !session.hit[opponentIndex]
                 ) {
-                    hit[opponentIndex] = true
-                    glow[note.lane] = songMs + 110.0
+                    session.hit[opponentIndex] = true
+                    session.glow[note.lane] = time + 110.0
                 }
 
                 opponentIndex++
@@ -199,103 +397,80 @@ fun PlayScreen(
 
             while (
                 missIndex < notes.size &&
-                notes[missIndex].timeMs < songMs - 160.0
+                notes[missIndex].timeMs < time - HIT_WINDOW_MS
             ) {
                 val note = notes[missIndex]
 
                 if (
                     note.lane in 4..7 &&
-                    !hit[missIndex]
+                    !session.hit[missIndex]
                 ) {
-                    hit[missIndex] = true
-                    missed[missIndex] = true
-                    counts[4]++
-
-                    combo = 0
-                    health = (
-                        health - 0.06f
-                    ).coerceAtLeast(0f)
+                    session.hit[missIndex] = true
+                    session.missed[missIndex] = true
+                    session.register(PlayResult.Miss, time)
                 }
 
                 missIndex++
             }
 
-            if (health <= 0f) {
-                failed = true
-                finished = true
-            } else if (songMs > endMs) {
-                finished = true
+            for (index in notes.indices) {
+                val note = notes[index]
+
+                if (
+                    note.lane !in 4..7 ||
+                    note.sustainMs <= 0.0 ||
+                    !session.hit[index] ||
+                    session.missed[index] ||
+                    session.sustainBroken[index]
+                ) continue
+
+                val lane = note.lane - 4
+                val sustainEnd = note.timeMs + note.sustainMs
+
+                if (time < note.timeMs) continue
+
+                if (time >= sustainEnd) {
+                    session.sustainProgress[index] = note.sustainMs
+                    continue
+                }
+
+                if (!session.held[lane]) {
+                    if (time > note.timeMs + 90.0) {
+                        session.sustainBroken[index] = true
+                        session.breakSustain(time)
+                    }
+                    continue
+                }
+
+                val progress = (
+                    time - note.timeMs
+                ).coerceIn(0.0, note.sustainMs)
+
+                session.sustainProgress[index] = progress
+
+                val lastTick = session.sustainLastTick[index]
+
+                if (
+                    lastTick.isNaN() ||
+                    time - lastTick >= SUSTAIN_TICK_MS
+                ) {
+                    session.sustainLastTick[index] = time
+                    session.score += 10
+                    session.health = (
+                        session.health + 0.002f
+                    ).coerceAtMost(2f)
+                }
+            }
+
+            if (session.health <= 0f) {
+                session.failed = true
+                session.finished = true
+            } else if (time > endMs) {
+                session.finished = true
             }
         }
 
         playback.pause()
-    }
-
-    fun press(lane: Int) {
-        if (
-            finished ||
-            songMs < 0.0 ||
-            lane !in 0..3
-        ) return
-
-        held[lane] = true
-
-        val currentTime = songMs
-
-        var index = notes.lowerBound(
-            currentTime - 160.0
-        )
-
-        while (
-            index < notes.size &&
-            notes[index].timeMs <= currentTime + 160.0
-        ) {
-            val note = notes[index]
-
-            if (
-                note.lane == lane + 4 &&
-                !hit[index]
-            ) {
-                val difference = abs(
-                    note.timeMs - currentTime
-                )
-
-                hit[index] = true
-
-                val rating = when {
-                    difference <= 45.0 -> 0
-                    difference <= 90.0 -> 1
-                    difference <= 135.0 -> 2
-                    else -> 3
-                }
-
-                counts[rating]++
-
-                score += intArrayOf(
-                    350,
-                    200,
-                    100,
-                    50
-                )[rating]
-
-                combo++
-
-                health = (
-                    health + 0.03f
-                ).coerceAtMost(2f)
-
-                glow[lane + 4] = currentTime + 110.0
-
-                break
-            }
-
-            index++
-        }
-    }
-
-    fun restart() {
-        playback.stop()
-        runId++
     }
 
     Box(
@@ -306,60 +481,66 @@ fun PlayScreen(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(runId) {
+                .pointerInput(runId, session) {
                     awaitPointerEventScope {
-                        val activePointers =
-                            HashMap<PointerId, Int>()
+                        val pointers = HashMap<PointerId, Int>()
 
-                        while (true) {
-                            val event = awaitPointerEvent()
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
 
-                            val laneWidth = min(
-                                size.height * 0.2f,
-                                size.width / 9.5f
-                            )
+                                val laneWidth = min(
+                                    size.height * 0.2f,
+                                    size.width / 9.5f
+                                )
 
-                            val gap = laneWidth * 0.7f
+                                val gap = laneWidth * 0.7f
+                                val startX = (
+                                    size.width -
+                                    (8 * laneWidth + gap)
+                                ) / 2f
 
-                            val startX = (
-                                size.width -
-                                (8 * laneWidth + gap)
-                            ) / 2f
+                                val playerX =
+                                    startX + 4 * laneWidth + gap
 
-                            val playerX =
-                                startX + 4 * laneWidth + gap
-
-                            for (change in event.changes) {
-                                if (
-                                    change.pressed &&
-                                    !change.previousPressed
-                                ) {
-                                    val x = change.position.x
-
+                                for (change in event.changes) {
                                     if (
-                                        x >= playerX &&
-                                        x < playerX + 4 * laneWidth
+                                        change.pressed &&
+                                        !change.previousPressed
                                     ) {
-                                        val lane = (
-                                            (x - playerX) / laneWidth
-                                        ).toInt().coerceIn(0, 3)
+                                        val x = change.position.x
 
-                                        press(lane)
+                                        if (
+                                            x >= playerX &&
+                                            x < playerX + 4 * laneWidth
+                                        ) {
+                                            val lane = (
+                                                (x - playerX) / laneWidth
+                                            ).toInt().coerceIn(0, 3)
 
-                                        activePointers[change.id] = lane
-                                    }
-
-                                    change.consume()
-                                } else if (
-                                    !change.pressed &&
-                                    change.previousPressed
-                                ) {
-                                    activePointers
-                                        .remove(change.id)
-                                        ?.let { lane ->
-                                            held[lane] = false
+                                            if (
+                                                !session.paused &&
+                                                !session.finished
+                                            ) {
+                                                press(lane)
+                                                pointers[change.id] = lane
+                                            }
                                         }
+
+                                        change.consume()
+                                    } else if (
+                                        !change.pressed &&
+                                        change.previousPressed
+                                    ) {
+                                        pointers.remove(change.id)?.let {
+                                            session.releaseLane(it)
+                                        }
+                                    }
                                 }
+                            }
+                        } finally {
+                            pointers.values.forEach {
+                                session.releaseLane(it)
                             }
                         }
                     }
@@ -374,7 +555,6 @@ fun PlayScreen(
             )
 
             val gap = laneWidth * 0.7f
-
             val startX = (
                 width - (8 * laneWidth + gap)
             ) / 2f
@@ -391,15 +571,14 @@ fun PlayScreen(
             }
 
             val strumY = height * 0.14f
-
-            val pixelsPerMs =
+            val pixelsPerMs = (
                 0.45f *
                 chart.speed.toFloat() *
                 (height / 720f)
+            ).coerceAtLeast(0.01f)
 
             val noteSize = laneWidth * 0.92f
-
-            val now = songMs
+            val now = session.songMs
 
             fun destination(
                 lane: Int,
@@ -409,24 +588,24 @@ fun PlayScreen(
                     (
                         laneX(lane) +
                         (laneWidth - noteSize) / 2f
-                    ).toInt(),
+                    ).roundToInt(),
                     (
                         centerY - noteSize / 2f
-                    ).toInt()
+                    ).roundToInt()
                 )
             }
 
             val imageSize = IntSize(
-                noteSize.toInt(),
-                noteSize.toInt()
+                noteSize.roundToInt().coerceAtLeast(1),
+                noteSize.roundToInt().coerceAtLeast(1)
             )
 
             for (lane in 0 until 8) {
                 val image = when {
-                    glow[lane] > now ->
+                    session.glow[lane] > now ->
                         sprites.confirms[lane % 4]
 
-                    lane >= 4 && held[lane - 4] ->
+                    lane >= 4 && session.held[lane - 4] ->
                         sprites.presses[lane % 4]
 
                     else ->
@@ -435,28 +614,26 @@ fun PlayScreen(
 
                 drawImage(
                     image = image,
-                    dstOffset = destination(
-                        lane,
-                        strumY
-                    ),
+                    dstOffset = destination(lane, strumY),
                     dstSize = imageSize,
                     alpha = if (lane < 4) 0.8f else 1f
                 )
             }
 
-            while (
-                drawPtr[0] < notes.size &&
-                notes[drawPtr[0]].let {
-                    it.timeMs + it.sustainMs
-                } < now - 400.0
-            ) {
-                drawPtr[0]++
-            }
+            val earliestVisible = now -
+                (strumY + noteSize) / pixelsPerMs
 
-            var index = drawPtr[0]
+            var index = notes.lowerBound(
+                earliestVisible - 500.0
+            )
 
             while (index < notes.size) {
                 val note = notes[index]
+
+                if (note.lane !in 0..7) {
+                    index++
+                    continue
+                }
 
                 val y = strumY + (
                     (note.timeMs - now) * pixelsPerMs
@@ -464,13 +641,11 @@ fun PlayScreen(
 
                 if (y > height + noteSize) break
 
-                val alpha = if (missed[index]) {
-                    0.3f
-                } else {
-                    1f
-                }
+                val alpha = if (
+                    session.missed[index]
+                ) 0.3f else 1f
 
-                if (note.sustainMs > 0) {
+                if (note.sustainMs > 0.0) {
                     val sustainEnd = strumY + (
                         (
                             note.timeMs +
@@ -479,38 +654,37 @@ fun PlayScreen(
                         ) * pixelsPerMs
                     ).toFloat()
 
-                    val top = if (
-                        hit[index] &&
-                        !missed[index]
+                    val sustainStart = if (
+                        session.hit[index] &&
+                        !session.missed[index]
                     ) {
                         maxOf(y, strumY)
                     } else {
                         y
                     }
 
-                    if (sustainEnd > top) {
+                    if (sustainEnd > sustainStart) {
                         drawRect(
                             color = Fk.lane[
                                 note.lane % 4
-                            ].copy(
-                                alpha = 0.55f * alpha
-                            ),
+                            ].copy(alpha = 0.55f * alpha),
                             topLeft = Offset(
                                 laneX(note.lane) +
                                     laneWidth / 2f -
                                     noteSize * 0.12f,
-                                top
+                                sustainStart
                             ),
                             size = Size(
                                 noteSize * 0.24f,
-                                sustainEnd - top
+                                sustainEnd - sustainStart
                             )
                         )
                     }
                 }
 
                 if (
-                    (!hit[index] || missed[index]) &&
+                    (!session.hit[index] ||
+                        session.missed[index]) &&
                     y > -noteSize
                 ) {
                     drawImage(
@@ -538,10 +712,7 @@ fun PlayScreen(
                     (width - barWidth) / 2f,
                     barY
                 ),
-                size = Size(
-                    barWidth,
-                    12f
-                )
+                size = Size(barWidth, 12f)
             )
 
             drawRect(
@@ -552,109 +723,200 @@ fun PlayScreen(
                 ),
                 size = Size(
                     barWidth *
-                        (health / 2f).coerceIn(0f, 1f),
+                        (session.health / 2f).coerceIn(0f, 1f),
                     12f
                 )
             )
         }
 
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = chart.song.uppercase(),
+                color = Fk.cyan,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Text(
+                text = "${(session.songMs / 1000.0).coerceAtLeast(0.0).toInt()}s",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 12.sp
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(4.dp)
+        ) {
+            IconButton(onClick = { pauseGame() }) {
+                Icon(
+                    Icons.Default.Pause,
+                    contentDescription = "Pause",
+                    tint = Color.White
+                )
+            }
+
+            IconButton(onClick = { exitGame() }) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Exit",
+                    tint = Color.White
+                )
+            }
+        }
+
         Text(
-            text = "Score $score   Combo $combo   Miss ${counts[4]}",
+            text = "Score ${session.score}   " +
+                "Combo ${session.combo}   " +
+                "Accuracy ${"%.2f".format(session.accuracy)}%   " +
+                "Miss ${session.counts[4]}",
             color = Color.White,
-            fontSize = 14.sp,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 30.dp)
         )
 
-        if (songMs < 0.0 && !finished) {
+        if (
+            session.lastRating.isNotEmpty() &&
+            session.lastRatingUntil > session.songMs &&
+            !session.finished
+        ) {
             Text(
-                text = "${(-songMs / 1000.0).toInt() + 1}",
+                text = session.lastRating,
+                color = when (session.lastRating) {
+                    "SICK" -> Fk.cyan
+                    "GOOD" -> Color.Green
+                    "BAD" -> Color.Yellow
+                    else -> Fk.pink
+                },
+                fontSize = 30.sp,
+                fontWeight = FontWeight.ExtraBold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
+        if (session.songMs < 0.0 && !session.finished) {
+            Text(
+                text = "${(-session.songMs / 1000.0).toInt() + 1}",
                 color = Fk.cyan,
                 fontSize = 72.sp,
                 fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.align(
-                    Alignment.Center
-                )
+                modifier = Modifier.align(Alignment.Center)
             )
         }
 
-        IconButton(
-            onClick = onExit,
-            modifier = Modifier.align(
-                Alignment.TopEnd
-            )
-        ) {
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = "Exit",
-                tint = Color.White
-            )
-        }
-
-        if (finished) {
+        if (session.paused && !session.finished) {
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .background(Color(0xE6140826))
+                    .background(
+                        Color(0xEF140826),
+                        RoundedCornerShape(18.dp)
+                    )
                     .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = if (failed) {
+                    text = "PAUSED",
+                    color = Fk.cyan,
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                Button(onClick = { resumeGame() }) {
+                    Icon(Icons.Default.PlayArrow, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("RESUME")
+                }
+
+                OutlinedButton(onClick = { restart() }) {
+                    Icon(Icons.Default.Refresh, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("RESTART")
+                }
+
+                OutlinedButton(onClick = { exitGame() }) {
+                    Text("EXIT")
+                }
+            }
+        }
+
+        if (session.finished) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(
+                        Color(0xEF140826),
+                        RoundedCornerShape(18.dp)
+                    )
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = if (session.failed) {
                         "GAME OVER"
                     } else {
                         "SONG COMPLETE"
                     },
-                    color = if (failed) {
-                        Fk.pink
-                    } else {
-                        Fk.cyan
-                    },
+                    color = if (session.failed) Fk.pink else Fk.cyan,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.ExtraBold
                 )
 
-                Spacer(
-                    modifier = Modifier.height(8.dp)
+                Text(
+                    text = "Rank ${session.rank}",
+                    color = Fk.yellow,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
                 )
 
                 Text(
-                    text = "Score $score",
+                    text = "Score ${session.score}",
                     color = Color.White
                 )
 
                 Text(
-                    text = "Sick ${counts[0]} • " +
-                        "Good ${counts[1]} • " +
-                        "Bad ${counts[2]} • " +
-                        "Shit ${counts[3]} • " +
-                        "Miss ${counts[4]}",
-                    color = Color.White.copy(
-                        alpha = 0.8f
-                    ),
-                    fontSize = 13.sp
+                    text = "Max Combo ${session.maxCombo}",
+                    color = Color.White
                 )
 
-                Spacer(
-                    modifier = Modifier.height(12.dp)
+                Text(
+                    text = "Accuracy ${"%.2f".format(session.accuracy)}%",
+                    color = Color.White
                 )
+
+                Text(
+                    text = "Sick ${session.counts[0]} • " +
+                        "Good ${session.counts[1]} • " +
+                        "Bad ${session.counts[2]} • " +
+                        "Shit ${session.counts[3]} • " +
+                        "Miss ${session.counts[4]}",
+                    color = Color.White.copy(alpha = 0.8f),
+                    fontSize = 12.sp
+                )
+
+                Spacer(Modifier.height(6.dp))
 
                 Row(
                     horizontalArrangement =
                         Arrangement.spacedBy(12.dp)
                 ) {
-                    Button(
-                        onClick = {
-                            restart()
-                        }
-                    ) {
+                    Button(onClick = { restart() }) {
                         Text("RESTART")
                     }
 
-                    OutlinedButton(
-                        onClick = onExit
-                    ) {
+                    OutlinedButton(onClick = { exitGame() }) {
                         Text("EXIT")
                     }
                 }
