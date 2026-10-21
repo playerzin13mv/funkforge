@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import java.io.File
 import kotlin.math.abs
@@ -44,7 +45,6 @@ class FunkinSound(
 
     private var lastSyncTime = 0L
     private var fallbackPosition = 0L
-    private var fallbackStartTime = 0L
 
     var onComplete: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
@@ -53,33 +53,90 @@ class FunkinSound(
         get() = currentState
 
     val isPlaying: Boolean
-        get() = currentState == FunkinSoundState.Playing
+        get() = currentState == FunkinSoundState.Playing &&
+            runCatching {
+                (instrumental ?: vocals)?.isPlaying == true
+            }.getOrDefault(false)
 
     val duration: Long
         get() = maxOf(
-            instrumental?.duration?.toLong() ?: 0L,
-            vocals?.duration?.toLong() ?: 0L
+            safeDuration(instrumental),
+            safeDuration(vocals)
         )
 
     val position: Long
         get() {
             val player = instrumental ?: vocals
 
-            if (player != null) {
-                return runCatching {
+            return if (player != null) {
+                runCatching {
                     player.currentPosition.toLong()
                 }.getOrDefault(fallbackPosition)
+            } else {
+                fallbackPosition
             }
-
-            if (isPlaying) {
-                return fallbackPosition + (
-                    (SystemClock.elapsedRealtime() - fallbackStartTime) *
-                        playbackSpeed
-                ).toLong()
-            }
-
-            return fallbackPosition
         }
+
+    private fun safeDuration(player: MediaPlayer?): Long {
+        return runCatching {
+            player?.duration?.toLong() ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    private fun safePosition(player: MediaPlayer?): Long {
+        return runCatching {
+            player?.currentPosition?.toLong() ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    private fun createPlayer(path: String): MediaPlayer {
+        val file = File(path)
+
+        require(file.exists() && file.isFile) {
+            "Audio file not found: $path"
+        }
+
+        return MediaPlayer().apply {
+            try {
+                setAudioAttributes(createAttributes())
+                setDataSource(file.absolutePath)
+                prepare()
+            } catch (e: Exception) {
+                release()
+                throw e
+            }
+        }
+    }
+
+    private fun createPlayer(uri: Uri): MediaPlayer {
+        return MediaPlayer().apply {
+            try {
+                setAudioAttributes(createAttributes())
+
+                appContext.contentResolver
+                    .openAssetFileDescriptor(uri, "r")
+                    ?.use { descriptor ->
+                        setDataSource(
+                            descriptor.fileDescriptor,
+                            descriptor.startOffset,
+                            descriptor.length
+                        )
+                    } ?: error("Unable to open audio URI")
+
+                prepare()
+            } catch (e: Exception) {
+                release()
+                throw e
+            }
+        }
+    }
+
+    private fun createAttributes(): AudioAttributes {
+        return AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_GAME)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+    }
 
     fun load(
         instPath: String?,
@@ -87,9 +144,9 @@ class FunkinSound(
     ): Boolean {
         if (released) return false
 
-        releasePlayers()
+        clearPlayers()
 
-        return try {
+        return runCatching {
             instrumental = instPath
                 ?.takeIf { it.isNotBlank() }
                 ?.let { createPlayer(it) }
@@ -98,26 +155,21 @@ class FunkinSound(
                 ?.takeIf { it.isNotBlank() }
                 ?.let { createPlayer(it) }
 
-            if (instrumental == null && vocals == null) {
-                throw IllegalArgumentException(
-                    "No audio files provided"
-                )
+            require(
+                instrumental != null || vocals != null
+            ) {
+                "No audio files provided"
             }
 
             configurePlayers()
 
             fallbackPosition = 0L
-            fallbackStartTime = 0L
             lastSyncTime = 0L
             currentState = FunkinSoundState.Ready
 
             true
-        } catch (e: Exception) {
-            releasePlayers()
-            currentState = FunkinSoundState.Error
-            onError?.invoke(
-                e.message ?: "Unable to load audio"
-            )
+        }.getOrElse {
+            handleError(it)
             false
         }
     }
@@ -128,9 +180,9 @@ class FunkinSound(
     ): Boolean {
         if (released) return false
 
-        releasePlayers()
+        clearPlayers()
 
-        return try {
+        return runCatching {
             instrumental = instUri?.let {
                 createPlayer(it)
             }
@@ -139,71 +191,23 @@ class FunkinSound(
                 createPlayer(it)
             }
 
-            if (instrumental == null && vocals == null) {
-                throw IllegalArgumentException(
-                    "No audio sources provided"
-                )
+            require(
+                instrumental != null || vocals != null
+            ) {
+                "No audio sources provided"
             }
 
             configurePlayers()
 
             fallbackPosition = 0L
-            fallbackStartTime = 0L
             lastSyncTime = 0L
             currentState = FunkinSoundState.Ready
 
             true
-        } catch (e: Exception) {
-            releasePlayers()
-            currentState = FunkinSoundState.Error
-            onError?.invoke(
-                e.message ?: "Unable to load audio"
-            )
+        }.getOrElse {
+            handleError(it)
             false
         }
-    }
-
-    private fun createPlayer(path: String): MediaPlayer {
-        val file = File(path)
-
-        if (!file.exists() || !file.isFile) {
-            throw IllegalArgumentException(
-                "Audio file not found: $path"
-            )
-        }
-
-        return MediaPlayer().apply {
-            setAudioAttributes(audioAttributes())
-            setDataSource(file.absolutePath)
-            prepare()
-        }
-    }
-
-    private fun createPlayer(uri: Uri): MediaPlayer {
-        return MediaPlayer().apply {
-            setAudioAttributes(audioAttributes())
-
-            appContext.contentResolver
-                .openAssetFileDescriptor(uri, "r")
-                ?.use { descriptor ->
-                    setDataSource(
-                        descriptor.fileDescriptor,
-                        descriptor.startOffset,
-                        descriptor.length
-                    )
-                } ?: throw IllegalArgumentException(
-                    "Unable to open audio URI"
-                )
-
-            prepare()
-        }
-    }
-
-    private fun audioAttributes(): AudioAttributes {
-        return AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_GAME)
-            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-            .build()
     }
 
     private fun configurePlayers() {
@@ -212,19 +216,36 @@ class FunkinSound(
             setOnCompletionListener {
                 handleCompletion()
             }
+            setOnErrorListener { _, what, extra ->
+                handleError(
+                    IllegalStateException(
+                        "Instrumental error: $what / $extra"
+                    )
+                )
+                true
+            }
         }
 
         vocals?.apply {
             isLooping = false
+
             if (instrumental == null) {
                 setOnCompletionListener {
                     handleCompletion()
                 }
             }
+
+            setOnErrorListener { _, what, extra ->
+                handleError(
+                    IllegalStateException(
+                        "Vocals error: $what / $extra"
+                    )
+                )
+                true
+            }
         }
 
         updateVolumes()
-        updatePlaybackSpeed()
     }
 
     fun play() {
@@ -243,19 +264,17 @@ class FunkinSound(
             instrumental?.start()
             vocals?.start()
 
-            fallbackStartTime = SystemClock.elapsedRealtime()
             currentState = FunkinSoundState.Playing
             lastSyncTime = 0L
+
+            updatePlaybackSpeed()
         } catch (e: Exception) {
-            currentState = FunkinSoundState.Error
-            onError?.invoke(
-                e.message ?: "Unable to start audio"
-            )
+            handleError(e)
         }
     }
 
     fun pause() {
-        if (!isPlaying || released) return
+        if (released || !isPlaying) return
 
         fallbackPosition = position
 
@@ -293,13 +312,11 @@ class FunkinSound(
         }
 
         seekTo(0L)
-        fallbackPosition = 0L
         currentState = FunkinSoundState.Ready
     }
 
     fun restart() {
         if (released) return
-
         stop()
         play()
     }
@@ -308,16 +325,18 @@ class FunkinSound(
         if (released) return
 
         val target = milliseconds
-            .coerceAtLeast(0L)
-            .coerceAtMost(duration)
+            .coerceIn(0L, duration)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
 
         runCatching {
-            instrumental?.seekTo(target.toInt())
-            vocals?.seekTo(target.toInt())
+            instrumental?.seekTo(target)
+            vocals?.seekTo(target)
+        }.onFailure {
+            handleError(it)
         }
 
-        fallbackPosition = target
-        fallbackStartTime = SystemClock.elapsedRealtime()
+        fallbackPosition = target.toLong()
         lastSyncTime = 0L
     }
 
@@ -332,9 +351,8 @@ class FunkinSound(
     }
 
     fun setVolume(volume: Float) {
-        val safeVolume = volume.coerceIn(0f, 1f)
-        instrumentalVolume = safeVolume
-        vocalsVolume = safeVolume
+        instrumentalVolume = volume.coerceIn(0f, 1f)
+        vocalsVolume = instrumentalVolume
         updateVolumes()
     }
 
@@ -349,23 +367,32 @@ class FunkinSound(
 
     fun setPlaybackSpeed(speed: Float) {
         playbackSpeed = speed.coerceIn(0.5f, 2f)
-        updatePlaybackSpeed()
+
+        if (isPlaying) {
+            updatePlaybackSpeed()
+        }
     }
 
     private fun updateVolumes() {
         val inst = if (muted) 0f else instrumentalVolume
         val voice = if (muted) 0f else vocalsVolume
 
-        instrumental?.setVolume(inst, inst)
-        vocals?.setVolume(voice, voice)
+        runCatching {
+            instrumental?.setVolume(inst, inst)
+            vocals?.setVolume(voice, voice)
+        }
     }
 
     private fun updatePlaybackSpeed() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return
+        }
+
         listOfNotNull(instrumental, vocals).forEach { player ->
             runCatching {
-                player.playbackParams = player.playbackParams.apply {
-                    speed = playbackSpeed
-                }
+                val params = player.playbackParams
+                params.speed = playbackSpeed
+                player.playbackParams = params
             }
         }
     }
@@ -381,18 +408,26 @@ class FunkinSound(
 
         val now = SystemClock.elapsedRealtime()
 
-        if (now - lastSyncTime < intervalMs) return
+        if (now - lastSyncTime < intervalMs) {
+            return
+        }
 
         lastSyncTime = now
 
-        val instPosition = inst.currentPosition
-        val voicePosition = voice.currentPosition
+        val instPosition = safePosition(inst)
+        val voicePosition = safePosition(voice)
 
         if (
             abs(instPosition - voicePosition) >
             toleranceMs
         ) {
-            voice.seekTo(instPosition)
+            runCatching {
+                voice.seekTo(
+                    instPosition.coerceAtMost(
+                        Int.MAX_VALUE.toLong()
+                    ).toInt()
+                )
+            }
         }
     }
 
@@ -400,14 +435,27 @@ class FunkinSound(
         if (released) return
 
         if (looping) {
-            seekTo(0L)
-            play()
+            restart()
             return
         }
 
         fallbackPosition = duration
         currentState = FunkinSoundState.Completed
+
+        runCatching {
+            vocals?.pause()
+        }
+
         onComplete?.invoke()
+    }
+
+    private fun handleError(error: Throwable) {
+        clearPlayers()
+        currentState = FunkinSoundState.Error
+
+        onError?.invoke(
+            error.message ?: "Unknown audio error"
+        )
     }
 
     fun getInfo(): FunkinSoundInfo {
@@ -419,25 +467,26 @@ class FunkinSound(
         )
     }
 
-    private fun releasePlayers() {
-        instrumental?.runCatching {
-            reset()
-            release()
-        }
-
-        vocals?.runCatching {
-            reset()
-            release()
-        }
+    private fun clearPlayers() {
+        val oldInst = instrumental
+        val oldVoices = vocals
 
         instrumental = null
         vocals = null
+
+        listOfNotNull(oldInst, oldVoices).forEach {
+            runCatching {
+                it.setOnCompletionListener(null)
+                it.setOnErrorListener(null)
+                it.release()
+            }
+        }
     }
 
     fun release() {
         if (released) return
 
-        releasePlayers()
+        clearPlayers()
 
         released = true
         currentState = FunkinSoundState.Released
